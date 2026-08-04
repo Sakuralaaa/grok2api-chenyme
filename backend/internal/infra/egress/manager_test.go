@@ -1219,11 +1219,14 @@ func TestConsoleClearanceUsesConsoleTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	solver := &recordingClearanceSolver{}
-	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{
+	manager := NewManager(&clearanceEgressRepositoryTestStub{egressRepositoryTestStub: egressRepositoryTestStub{nodes: []domain.Node{
 		{ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
 		{ID: 2, Name: "console", Scope: domain.ScopeConsole, Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
-	}}, cipher)
+	}}}, cipher)
 	manager.solver = solver
+	manager.newBrowserClient = func(string, string) (*browserClient, error) {
+		return &browserClient{}, nil
+	}
 	manager.UpdateClearanceConfig(ClearanceConfig{
 		Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com",
 		Timeout: time.Second, RefreshInterval: time.Hour,
@@ -2283,6 +2286,22 @@ func TestOperationsConfigSnapshotCanBeInvalidated(t *testing.T) {
 
 type egressRepositoryTestStub struct{ nodes []domain.Node }
 
+type clearanceEgressRepositoryTestStub struct {
+	egressRepositoryTestStub
+}
+
+func (clearanceEgressRepositoryTestStub) UpdateEgressNodeClearance(context.Context, uint64, string, string, string, string, time.Time) error {
+	return nil
+}
+
+func (clearanceEgressRepositoryTestStub) UpdateEgressNodeHealth(context.Context, uint64, float64, int, *time.Time, string) error {
+	return nil
+}
+
+func (clearanceEgressRepositoryTestStub) UpdateEgressNodeLastError(context.Context, uint64, string) error {
+	return nil
+}
+
 type fallbackEgressRepository struct {
 	egressRepositoryTestStub
 	config    domain.OperationsConfig
@@ -2343,7 +2362,6 @@ type blockingEgressRepository struct {
 	listRelease chan struct{}
 	listOnce    sync.Once
 }
-
 
 type recordingClearanceSolver struct {
 	calls   int
