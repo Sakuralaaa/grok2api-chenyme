@@ -1214,10 +1214,14 @@ func TestConsoleClearanceUsesConsoleTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	proxyURL, err := cipher.Encrypt("http://proxy:1080")
+	if err != nil {
+		t.Fatal(err)
+	}
 	solver := &recordingClearanceSolver{}
 	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{
-		{ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1},
-		{ID: 2, Name: "console", Scope: domain.ScopeConsole, Enabled: true, Health: 1},
+		{ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
+		{ID: 2, Name: "console", Scope: domain.ScopeConsole, Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
 	}}, cipher)
 	manager.solver = solver
 	manager.UpdateClearanceConfig(ClearanceConfig{
