@@ -862,6 +862,12 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 		}
 		candidateAvailable := make([]domain.Node, 0, len(nodes))
 		for _, node := range nodes {
+			// Repositories normally filter by candidateScope, but keep the
+			// runtime boundary explicit so a malformed or stale implementation
+			// cannot hand a Web node to the Console path.
+			if !domain.SupportsScope(node.Scope, scope) {
+				continue
+			}
 			if !node.Enabled {
 				continue
 			}

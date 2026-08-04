@@ -243,7 +243,7 @@ func TestEgressOperationsRejectsIncompatibleNodeScopeChangeWithBindings(t *testi
 	}
 }
 
-func TestEgressOperationsAllowsCompatibleNodeScopeChangeWithBindings(t *testing.T) {
+func TestEgressOperationsRejectsConsoleBindingOnWebNode(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDatabase(t)
 	accounts := NewAccountRepository(database)
@@ -252,16 +252,15 @@ func TestEgressOperationsAllowsCompatibleNodeScopeChangeWithBindings(t *testing.
 	node := createHealthyEgressNodeForScope(t, ctx, nodes, cipher, "bound-console", egress.ScopeWeb, 0)
 	credential := createEgressOperationsProviderAccount(t, ctx, accounts, account.ProviderConsole, "bound-console")
 	service := egressapp.NewService(nodes, cipher, "test-browser", accounts)
-	if _, err := service.AssignAccounts(ctx, node.ID, account.ProviderConsole, []uint64{credential.ID}, account.EgressAssignmentManual); err != nil {
-		t.Fatal(err)
+	if _, err := service.AssignAccounts(ctx, node.ID, account.ProviderConsole, []uint64{credential.ID}, account.EgressAssignmentManual); !errors.Is(err, egressapp.ErrInvalidInput) {
+		t.Fatalf("Web node accepted Console binding: %v", err)
 	}
-
-	updated, err := service.Update(ctx, node.ID, egressapp.Input{Name: node.Name, Scope: egress.ScopeConsole, Enabled: true})
+	stored, err := nodes.GetEgressNode(ctx, node.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Scope != egress.ScopeConsole {
-		t.Fatalf("updated scope = %q", updated.Scope)
+	if stored.Scope != egress.ScopeWeb {
+		t.Fatalf("persisted scope = %q", stored.Scope)
 	}
 }
 

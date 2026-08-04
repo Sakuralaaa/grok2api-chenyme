@@ -1196,11 +1196,16 @@ func TestConsoleDoesNotFallBackToWebNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer web.Release()
-	if _, err := manager.AcquireCredential(context.Background(), domain.ScopeConsole, accountdomain.Credential{
+	console, err := manager.AcquireCredential(context.Background(), domain.ScopeConsole, accountdomain.Credential{
 		ID: 22, Provider: accountdomain.ProviderConsole, AuthType: accountdomain.AuthTypeSSO,
 		EncryptedAccessToken: encryptedToken,
-	}); err == nil {
-		t.Fatal("console reused web node after console clearance was split from grok.com")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer console.Release()
+	if console.NodeID != 0 {
+		t.Fatalf("console used node %d instead of direct transport; Web node was reused", console.NodeID)
 	}
 }
 
@@ -1209,14 +1214,10 @@ func TestConsoleClearanceUsesConsoleTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxyURL, err := cipher.Encrypt("socks5h://proxy:1080")
-	if err != nil {
-		t.Fatal(err)
-	}
 	solver := &recordingClearanceSolver{}
 	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{
-		{ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
-		{ID: 2, Name: "console", Scope: domain.ScopeConsole, Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
+		{ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1},
+		{ID: 2, Name: "console", Scope: domain.ScopeConsole, Enabled: true, Health: 1},
 	}}, cipher)
 	manager.solver = solver
 	manager.UpdateClearanceConfig(ClearanceConfig{
