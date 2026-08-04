@@ -1138,6 +1138,7 @@ func TestLinkedProvidersSharePersistedResinIdentity(t *testing.T) {
 	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{
 		{ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
 		{ID: 2, Name: "build", Scope: domain.ScopeBuild, Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
+		{ID: 3, Name: "console", Scope: domain.ScopeConsole, Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
 	}}, cipher)
 	const identity = "sso_persisted_identity"
 	web, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
@@ -1169,7 +1170,7 @@ func TestLinkedProvidersSharePersistedResinIdentity(t *testing.T) {
 	}
 }
 
-func TestConsoleFallsBackToWebAndSharesSSOResinIdentity(t *testing.T) {
+func TestConsoleDoesNotFallBackToWebNode(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
 		t.Fatal(err)
@@ -1195,20 +1196,51 @@ func TestConsoleFallsBackToWebAndSharesSSOResinIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer web.Release()
-	console, err := manager.AcquireCredential(context.Background(), domain.ScopeConsole, accountdomain.Credential{
+	if _, err := manager.AcquireCredential(context.Background(), domain.ScopeConsole, accountdomain.Credential{
 		ID: 22, Provider: accountdomain.ProviderConsole, AuthType: accountdomain.AuthTypeSSO,
 		EncryptedAccessToken: encryptedToken,
-	})
+	}); err == nil {
+		t.Fatal("console reused web node after console clearance was split from grok.com")
+	}
+}
+
+func TestConsoleClearanceUsesConsoleTarget(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer console.Release()
-	wantAccount := "sso_" + security.HashToken(token)[:32]
-	if web.NodeID != 7 || console.NodeID != 7 {
-		t.Fatalf("nodes web=%d console=%d, want shared Web node", web.NodeID, console.NodeID)
+	proxyURL, err := cipher.Encrypt("socks5h://proxy:1080")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(web.ProxyURL, "Default."+wantAccount+":") || web.ProxyURL != console.ProxyURL {
-		t.Fatalf("proxy identities web=%q console=%q", web.ProxyURL, console.ProxyURL)
+	solver := &recordingClearanceSolver{}
+	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{
+		{ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
+		{ID: 2, Name: "console", Scope: domain.ScopeConsole, Enabled: true, Health: 1, EncryptedProxyURL: proxyURL},
+	}}, cipher)
+	manager.solver = solver
+	manager.UpdateClearanceConfig(ClearanceConfig{
+		Mode: "flaresolverr", FlareSolverrURL: "http://solver", TargetURL: "https://grok.com",
+		Timeout: time.Second, RefreshInterval: time.Hour,
+	})
+	web, err := manager.Acquire(context.Background(), domain.ScopeWeb, "web-account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	web.Release()
+	console, err := manager.Acquire(context.Background(), domain.ScopeConsole, "console-account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	console.Release()
+	if len(solver.targets) != 2 {
+		t.Fatalf("targets = %#v", solver.targets)
+	}
+	if solver.targets[0] != "https://grok.com" {
+		t.Fatalf("web target = %q", solver.targets[0])
+	}
+	if solver.targets[1] != "https://console.x.ai" {
+		t.Fatalf("console target = %q", solver.targets[1])
 	}
 }
 
@@ -2305,6 +2337,25 @@ type blockingEgressRepository struct {
 	listStarted chan struct{}
 	listRelease chan struct{}
 	listOnce    sync.Once
+}
+
+
+type recordingClearanceSolver struct {
+	calls   int
+	targets []string
+	err     error
+}
+
+func (s *recordingClearanceSolver) Solve(_ context.Context, cfg ClearanceConfig, _ string) (clearanceSolution, error) {
+	s.calls++
+	s.targets = append(s.targets, strings.TrimRight(strings.TrimSpace(cfg.TargetURL), "/"))
+	if s.err != nil {
+		return clearanceSolution{}, s.err
+	}
+	return clearanceSolution{
+		Cookies:   fmt.Sprintf("cf_clearance=value-%d", s.calls),
+		UserAgent: fmt.Sprintf("Mozilla/5.0 solver/%d", s.calls),
+	}, nil
 }
 
 type clearanceSolverStub struct {

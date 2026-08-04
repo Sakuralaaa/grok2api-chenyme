@@ -247,11 +247,12 @@ func (value OperationsConfig) FallbackFor(scope Scope) FallbackConfig {
 }
 
 // SupportsScope reports whether a node can serve requests for the supplied
-// scope. Console may intentionally reuse a Web browser proxy, and Web assets
-// inherit a Web node when no asset-specific node is required.
+// scope. Web assets inherit a Web node when no asset-specific node is required.
+// Console must use Console-scoped egress because its Cloudflare session is
+// bound to console.x.ai rather than grok.com.
 func SupportsScope(nodeScope, requestScope Scope) bool {
 	if nodeScope == requestScope {
 		return true
 	}
-	return (requestScope == ScopeWebAsset || requestScope == ScopeConsole) && nodeScope == ScopeWeb
+	return requestScope == ScopeWebAsset && nodeScope == ScopeWeb
 }

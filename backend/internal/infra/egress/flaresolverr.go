@@ -25,11 +25,12 @@ var (
 )
 
 type ClearanceConfig struct {
-	Mode            string
-	FlareSolverrURL string
-	TargetURL       string
-	Timeout         time.Duration
-	RefreshInterval time.Duration
+	Mode             string
+	FlareSolverrURL  string
+	TargetURL        string // Web / WebAsset clearance target (default https://grok.com)
+	ConsoleTargetURL string // Console clearance target (default https://console.x.ai)
+	Timeout          time.Duration
+	RefreshInterval  time.Duration
 }
 
 type clearanceSolution struct {

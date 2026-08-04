@@ -231,7 +231,7 @@ func NewManager(repository repository.EgressRepository, cipher *security.Cipher)
 		failureProbes:  make(map[uint64]failureProbeState),
 		newBuildClient: newBuildRequestClient, newBuildEnvClient: newBuildEnvironmentRequestClient, newBrowserClient: newBrowserClient,
 		solver:          flaresolverrSolver{},
-		clearanceConfig: ClearanceConfig{Mode: "manual", TargetURL: "https://grok.com", Timeout: time.Minute, RefreshInterval: 10 * time.Minute},
+		clearanceConfig: ClearanceConfig{Mode: "manual", TargetURL: "https://grok.com", ConsoleTargetURL: "https://console.x.ai", Timeout: time.Minute, RefreshInterval: 10 * time.Minute},
 	}
 	manager.buildHeaderTimeout.Store(int64(settingsdomain.DefaultBuildResponseHeaderTimeout))
 	return manager
@@ -404,10 +404,17 @@ func (m *Manager) UpdateClearanceConfig(value ClearanceConfig) {
 	value.Mode = strings.TrimSpace(value.Mode)
 	value.FlareSolverrURL = strings.TrimSpace(value.FlareSolverrURL)
 	value.TargetURL = strings.TrimRight(strings.TrimSpace(value.TargetURL), "/")
+	value.ConsoleTargetURL = strings.TrimRight(strings.TrimSpace(value.ConsoleTargetURL), "/")
+	if value.ConsoleTargetURL == "" {
+		value.ConsoleTargetURL = defaultClearanceTargetURL(domain.ScopeConsole)
+	}
+	if value.TargetURL == "" {
+		value.TargetURL = defaultClearanceTargetURL(domain.ScopeWeb)
+	}
 	m.clearanceMu.Lock()
 	previous := m.clearanceConfig
 	m.clearanceConfig = value
-	configurationChanged := previous.Mode != value.Mode || previous.FlareSolverrURL != value.FlareSolverrURL || previous.TargetURL != value.TargetURL
+	configurationChanged := previous.Mode != value.Mode || previous.FlareSolverrURL != value.FlareSolverrURL || previous.TargetURL != value.TargetURL || previous.ConsoleTargetURL != value.ConsoleTargetURL
 	if configurationChanged {
 		m.clearanceVersion++
 		m.clientMu.Lock()
@@ -1290,10 +1297,10 @@ func fallbackScopes(scope domain.Scope) []domain.Scope {
 		return []domain.Scope{domain.ScopeWebAsset, domain.ScopeWeb}
 	}
 	if scope == domain.ScopeConsole {
-		// Console uses the same browser/clearance surface as Grok Web. A
-		// dedicated Console node is preferred, but a Web node is a safe and
-		// expected fallback for deployments that configure one shared pool.
-		return []domain.Scope{domain.ScopeConsole, domain.ScopeWeb}
+		// Console clearance is bound to console.x.ai. Do not fall back to Web
+		// nodes that solve Cloudflare against grok.com, or Console requests will
+		// reuse the wrong browser session cookies.
+		return []domain.Scope{domain.ScopeConsole}
 	}
 	return []domain.Scope{scope}
 }
@@ -1720,8 +1727,8 @@ func (m *Manager) clearanceMode() string {
 
 func (m *Manager) ensureClearance(ctx context.Context, node domain.Node, proxyURL, existingCookies, existingUserAgent, key string, persist bool) (string, string, error) {
 	m.clearanceMu.Lock()
-	cfg := m.clearanceConfig
 	version := m.clearanceVersion
+	cfg := m.clearanceConfigForScopeUnlocked(node.Scope)
 	interval := clearanceRefreshInterval(cfg)
 	now := time.Now().UTC()
 	fingerprint := clearanceFingerprint(cfg, proxyURL)
@@ -1796,7 +1803,7 @@ func (m *Manager) ensureClearance(ctx context.Context, node domain.Node, proxyUR
 
 func (m *Manager) refreshNode(ctx context.Context, node domain.Node, proxyURL, key string, persist, force, waitForPeer bool, refreshAfter time.Time) (clearanceSolution, error) {
 	m.clearanceMu.Lock()
-	cfg := m.clearanceConfig
+	cfg := m.clearanceConfigForScopeUnlocked(node.Scope)
 	solveVersion := m.clearanceVersion
 	solver := m.solver
 	lock := m.clearanceLock
@@ -1976,6 +1983,55 @@ func (m *Manager) ensureClearanceCacheCapacityLocked() {
 	}
 }
 
+
+func defaultClearanceTargetURL(scope domain.Scope) string {
+	switch scope {
+	case domain.ScopeConsole:
+		return "https://console.x.ai"
+	default:
+		return "https://grok.com"
+	}
+}
+
+// clearanceConfigForScope returns a scope-bound clearance config. Console nodes
+// must solve Cloudflare against console.x.ai, while Web/WebAsset continue to use
+// the configured Web target (default https://grok.com).
+func (m *Manager) clearanceConfigForScope(scope domain.Scope) ClearanceConfig {
+	m.clearanceMu.Lock()
+	defer m.clearanceMu.Unlock()
+	return m.clearanceConfigForScopeUnlocked(scope)
+}
+
+func (m *Manager) clearanceConfigForScopeUnlocked(scope domain.Scope) ClearanceConfig {
+	cfg := m.clearanceConfig
+	if scope == domain.ScopeConsole {
+		cfg.TargetURL = strings.TrimRight(strings.TrimSpace(cfg.ConsoleTargetURL), "/")
+		if cfg.TargetURL == "" {
+			cfg.TargetURL = defaultClearanceTargetURL(domain.ScopeConsole)
+		}
+		return cfg
+	}
+	if strings.TrimSpace(cfg.TargetURL) == "" {
+		cfg.TargetURL = defaultClearanceTargetURL(domain.ScopeWeb)
+	}
+	return cfg
+}
+
+func clearanceTargetURLForScope(cfg ClearanceConfig, scope domain.Scope) string {
+	if scope == domain.ScopeConsole {
+		target := strings.TrimRight(strings.TrimSpace(cfg.ConsoleTargetURL), "/")
+		if target == "" {
+			return defaultClearanceTargetURL(domain.ScopeConsole)
+		}
+		return target
+	}
+	target := strings.TrimRight(strings.TrimSpace(cfg.TargetURL), "/")
+	if target == "" {
+		return defaultClearanceTargetURL(domain.ScopeWeb)
+	}
+	return target
+}
+
 func clearanceRefreshInterval(cfg ClearanceConfig) time.Duration {
 	if cfg.RefreshInterval > 0 {
 		return cfg.RefreshInterval
@@ -2153,14 +2209,14 @@ func (m *Manager) invalidateClearanceKey(key string, client requestClient) {
 
 func (m *Manager) RefreshDueClearances(ctx context.Context, force bool) error {
 	m.clearanceMu.Lock()
-	cfg := m.clearanceConfig
+	baseCfg := m.clearanceConfig
 	direct := m.clearances["direct"]
 	version := m.clearanceVersion
 	m.clearanceMu.Unlock()
-	if cfg.Mode != "flaresolverr" {
+	if baseCfg.Mode != "flaresolverr" {
 		return nil
 	}
-	interval := clearanceRefreshInterval(cfg)
+	interval := clearanceRefreshInterval(baseCfg)
 	now := time.Now().UTC()
 	nodes, err := m.repository.ListEgressNodes(ctx, "", repository.SortQuery{})
 	if err != nil {
@@ -2191,6 +2247,7 @@ func (m *Manager) RefreshDueClearances(ctx context.Context, force bool) error {
 		m.clearanceMu.Lock()
 		key := clearanceCacheKey(node.ID, proxyURL, false)
 		state, known := m.clearances[key]
+		cfg := m.clearanceConfigForScopeUnlocked(node.Scope)
 		m.clearanceMu.Unlock()
 		fingerprint := clearanceFingerprint(cfg, proxyURL)
 		memoryFresh := known && !state.invalid && state.version == version && state.fingerprint == fingerprint && now.Sub(state.refreshedAt) < interval
