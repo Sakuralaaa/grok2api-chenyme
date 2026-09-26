@@ -882,14 +882,20 @@ func TestBuildImageEditPayloadMatchesCapturedMediaGenInputShape(t *testing.T) {
 	if !ok {
 		t.Fatalf("imageToImage = %#v", mediaGenInput["imageToImage"])
 	}
-	if len(payload) != 6 || payload["modelName"] != "imagine-image-edit" || payload["message"] != "改成兔子" ||
+	if len(payload) != 8 || payload["modelName"] != "imagine-image-edit" || payload["message"] != "改成兔子" ||
 		payload["enableImageStreaming"] != true || payload["enableSideBySide"] != true || payload["sendFinalMetadata"] != true {
 		t.Fatalf("payload = %#v", payload)
+	}
+	metadata, _ := payload["responseMetadata"].(map[string]any)
+	override, _ := metadata["modelConfigOverride"].(map[string]any)
+	modelMap, _ := override["modelMap"].(map[string]any)
+	if payload["kind"] != "CONVERSATION_KIND_IMAGINE" || modelMap["imageEditModel"] != "imagine" {
+		t.Fatalf("Imagine conversation metadata = %#v", payload)
 	}
 	if imageToImage["prompt"] != "改成兔子" || imageToImage["aspectRatio"] != "1:1" || !slices.Equal(imageToImage["inputAssets"].([]string), assets) {
 		t.Fatalf("imageToImage = %#v", imageToImage)
 	}
-	for _, field := range []string{"temporary", "enableImageGeneration", "imageGenerationCount", "config", "responseMetadata", "kind", "parentPostId"} {
+	for _, field := range []string{"temporary", "enableImageGeneration", "imageGenerationCount", "config", "parentPostId"} {
 		if _, exists := payload[field]; exists {
 			t.Fatalf("legacy field %q leaked into payload: %#v", field, payload)
 		}
@@ -899,6 +905,20 @@ func TestBuildImageEditPayloadMatchesCapturedMediaGenInputShape(t *testing.T) {
 	imageToImage = mediaGenInput["imageToImage"].(map[string]any)
 	if _, exists := imageToImage["aspectRatio"]; exists {
 		t.Fatalf("empty aspect ratio leaked into payload: %#v", imageToImage)
+	}
+}
+
+func TestImageEditDetectsGeneratedImageCard(t *testing.T) {
+	generated := []byte(`{"result":{"response":{"cardAttachment":{"jsonData":"{\"type\":\"render_generated_image\",\"cardType\":\"generated_image_card\",\"image_chunk\":{\"imageUrl\":\"users/test/generated/market/image.jpg\",\"progress\":100}}"}}}}`)
+	if !imageEditReturnedGeneration(generated) {
+		t.Fatal("ordinary generated image was accepted as an edit")
+	}
+	edited := []byte(`{"result":{"response":{"modelResponse":{"cardAttachmentsJson":["{\"type\":\"render_edited_image\",\"image_chunk\":{\"imageUrl\":\"users/test/generated/edit/image.jpg\",\"progress\":100}}"]}}}}`)
+	if imageEditReturnedGeneration(append(generated, edited...)) {
+		t.Fatal("valid edit card was rejected")
+	}
+	if imageEditReturnedGeneration([]byte(`{"result":{"response":{"streamingImageGenerationResponse":{"imageUrl":"users/test/generated/edit/image.jpg","progress":100}}}}`)) {
+		t.Fatal("legacy edit response without cards was rejected")
 	}
 }
 

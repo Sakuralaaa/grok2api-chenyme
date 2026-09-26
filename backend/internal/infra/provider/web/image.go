@@ -887,6 +887,9 @@ func (a *Adapter) editImageAttempt(ctx context.Context, request provider.ImageEd
 		return nil, consumeErr
 	}
 	urls := imageEditResultURLs(&parsed, capture.Bytes())
+	if imageEditReturnedGeneration(capture.Bytes()) {
+		return imageEditUnrelatedResponse(), nil
+	}
 	if len(urls) == 0 {
 		return jsonProviderResponse(http.StatusBadGateway, map[string]any{"error": map[string]any{
 			"message": "上游未返回可用的编辑图片",
@@ -911,6 +914,10 @@ func buildImageEditPayload(prompt string, assets []string, aspectRatio string) m
 	return map[string]any{
 		"modelName": "imagine-image-edit", "message": prompt,
 		"enableImageStreaming": true, "enableSideBySide": true, "sendFinalMetadata": true,
+		"kind": "CONVERSATION_KIND_IMAGINE",
+		"responseMetadata": map[string]any{"modelConfigOverride": map[string]any{"modelMap": map[string]any{
+			"imageEditModel": "imagine",
+		}}},
 		"mediaGenInput": map[string]any{"imageToImage": imageToImage},
 	}
 }
@@ -1002,6 +1009,10 @@ func (a *Adapter) streamImageEdit(
 		return
 	}
 	urls := imageEditResultURLs(&parsed, capture.Bytes())
+	if imageEditReturnedGeneration(capture.Bytes()) {
+		_ = writer.CloseWithError(fmt.Errorf("Grok Web 返回了普通生图结果，未按参考图编辑"))
+		return
+	}
 	if len(urls) == 0 {
 		err := fmt.Errorf("上游未返回可用的编辑图片")
 		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
@@ -1078,6 +1089,63 @@ func imageEditResultURLs(parsed *parsedChat, captured []byte) []string {
 		result = append(result, value)
 	}
 	return result
+}
+
+func imageEditUnrelatedResponse() *provider.Response {
+	return jsonProviderResponse(http.StatusBadGateway, map[string]any{"error": map[string]any{
+		"message": "Grok Web 返回了普通生图结果，未按参考图编辑",
+		"type":    "upstream_error", "code": "image_edit_unrelated",
+	}})
+}
+
+// An explicit generated-image card means Imagine did not run its edit path.
+// Leave responses without a typed card alone for compatibility with older streams.
+func imageEditReturnedGeneration(captured []byte) bool {
+	generated, edited := false, false
+	checkCard := func(value any) {
+		var visit func(any)
+		visit = func(value any) {
+			if values, ok := value.([]any); ok {
+				for _, item := range values {
+					visit(item)
+				}
+				return
+			}
+			card := cardAttachmentData(value)
+			if card == nil {
+				if encoded, ok := value.(string); ok {
+					var decoded map[string]any
+					if json.Unmarshal([]byte(encoded), &decoded) == nil {
+						card = decoded
+					}
+				}
+			}
+			if card == nil {
+				return
+			}
+			switch card["type"] {
+			case "render_edited_image":
+				edited = true
+			case "render_generated_image":
+				generated = true
+			}
+		}
+		visit(value)
+	}
+	err := consumeJSONObjects(bytes.NewReader(captured), 8<<20, func(frame []byte) error {
+		var root map[string]any
+		if json.Unmarshal(frame, &root) != nil {
+			return nil
+		}
+		result, _ := root["result"].(map[string]any)
+		response, _ := result["response"].(map[string]any)
+		checkCard(response["cardAttachment"])
+		checkCard(response["cardAttachments"])
+		modelResponse, _ := response["modelResponse"].(map[string]any)
+		checkCard(modelResponse["cardAttachmentsJson"])
+		return nil
+	})
+	return err == nil && generated && !edited
 }
 
 type boundedCapture struct {
