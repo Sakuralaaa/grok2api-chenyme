@@ -195,7 +195,7 @@ func swaggerMessages() {}
 // @Summary 生成图片
 // @Tags Images
 // @Security BearerAuth
-// @Accept json mpfd
+// @Accept json,mpfd
 // @Produce json
 // @Param request body SwaggerImageGenerationRequest true "请求"
 // @Success 200 {object} map[string]any
@@ -207,7 +207,7 @@ func swaggerGenerateImage() {}
 // @Summary 编辑图片
 // @Tags Images
 // @Security BearerAuth
-// @Accept json mpfd
+// @Accept json,mpfd
 // @Produce json
 // @Param request body SwaggerImageEditRequest true "请求"
 // @Success 200 {object} map[string]any
