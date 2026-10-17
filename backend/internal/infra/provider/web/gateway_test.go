@@ -36,7 +36,7 @@ func TestGatewayEndpointAndHeadersMatchBrowserProtocol(t *testing.T) {
 func TestGatewaySessionSupportsNewAndExistingConversations(t *testing.T) {
 	fresh := gatewaySession("fast", nil)
 	freshXGrok := fresh["x_grok"].(map[string]any)
-	if fresh["model"] != "fast" || freshXGrok["is_temporary"] != true || freshXGrok["load_existing"] != nil {
+	if fresh["model"] != "fast" || freshXGrok["is_temporary"] != nil || freshXGrok["keep_context"] != nil || freshXGrok["disable_memory"] != nil || freshXGrok["load_existing"] != nil || freshXGrok["accept_interleaved_phases"] != true || freshXGrok["client_side_toolsets"] != nil {
 		t.Fatalf("fresh session = %#v", fresh)
 	}
 	previous := &inferencedomain.WebResponseState{ConversationID: "conversation-1", UpstreamParentResponseID: "response-1"}
