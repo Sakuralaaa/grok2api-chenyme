@@ -3788,7 +3788,7 @@ func (s *Service) ListDueQuotaWindows(ctx context.Context, now time.Time, limit 
 
 func isWebChatQuotaMode(mode string) bool {
 	switch mode {
-	case "auto", "fast", "expert", "heavy":
+	case "auto", "fast", "expert", "heavy", "build":
 		return true
 	default:
 		return false
