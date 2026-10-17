@@ -37,7 +37,7 @@ import (
 
 func TestCatalogMatchesSupportedSurface(t *testing.T) {
 	values := Catalog()
-	requiredModels := []string{"grok-chat-fast", "grok-chat-auto", "grok-chat-expert", "grok-chat-heavy", "grok-imagine-image-lite", "grok-imagine-image", "grok-imagine-image-2.0", "grok-imagine-image-edit", "grok-imagine-video"}
+	requiredModels := []string{"grok-chat-fast", "grok-chat-auto", "grok-chat-expert", "grok-chat-build", "grok-chat-heavy", "grok-imagine-image-lite", "grok-imagine-image", "grok-imagine-image-2.0", "grok-imagine-image-edit", "grok-imagine-video"}
 	if len(values) != len(requiredModels) {
 		t.Fatalf("catalog size = %d", len(values))
 	}
@@ -394,20 +394,15 @@ func TestChatImageUploadFeedsFileMetadataIntoConversation(t *testing.T) {
 			initialID := initialEvent["event_id"].(string)
 			_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "session.created", "client_event_id": initialID}})
 			_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "conversation.attached", "conversation": map[string]any{"id": "conv_1"}}})
-			var item map[string]any
-			if err := connection.ReadJSON(&item); err != nil {
-				t.Errorf("read conversation.item.create: %v", err)
-				return
-			}
-			itemEvent := item["event"].(map[string]any)
-			attachments, _ := itemEvent["file_attachment_ids"].([]any)
-			if len(attachments) != 1 || attachments[0] != "file_meta_1" {
-				t.Errorf("file_attachment_ids = %#v", itemEvent["file_attachment_ids"])
-			}
 			var create map[string]any
 			if err := connection.ReadJSON(&create); err != nil || create["event"].(map[string]any)["type"] != "response.create" {
 				t.Errorf("read response.create: value=%#v err=%v", create, err)
 				return
+			}
+			createEvent := create["event"].(map[string]any)
+			attachments, _ := createEvent["file_attachment_ids"].([]any)
+			if len(attachments) != 1 || attachments[0] != "file_meta_1" {
+				t.Errorf("file_attachment_ids = %#v", createEvent["file_attachment_ids"])
 			}
 			_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "response.chunk", "chunk": map[string]any{"text": map[string]any{"text": "seen", "channel": "CHANNEL_ASSISTANT_RESPONSE"}}}})
 			_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "response.done", "response": map[string]any{"id": "parent_1", "status": "completed"}}})
@@ -474,19 +469,14 @@ func TestForwardMessagesWebSearchEndToEnd(t *testing.T) {
 				initialID := initial["event"].(map[string]any)["event_id"].(string)
 				_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "session.created", "client_event_id": initialID}})
 				_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "conversation.attached", "conversation": map[string]any{"id": "conv_1"}}})
-				var item map[string]any
-				if err := connection.ReadJSON(&item); err != nil {
-					t.Errorf("read conversation.item.create: %v", err)
-					return
-				}
-				itemValue := item["event"].(map[string]any)["item"].(map[string]any)
-				chunks := itemValue["x_grok"].(map[string]any)["input_chunks"].([]any)
-				upstreamMessage, _ = chunks[len(chunks)-1].(map[string]any)["text"].(map[string]any)["text"].(string)
 				var create map[string]any
 				if err := connection.ReadJSON(&create); err != nil {
 					t.Errorf("read response.create: %v", err)
 					return
 				}
+				itemValue := create["event"].(map[string]any)["item"].(map[string]any)
+				chunks := itemValue["x_grok"].(map[string]any)["input_chunks"].([]any)
+				upstreamMessage, _ = chunks[len(chunks)-1].(map[string]any)["text"].(map[string]any)["text"].(string)
 				_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "response.search.result", "result": map[string]any{"url": "https://doc.rust-lang.org", "title": "The Rust Book"}}})
 				_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "response.chunk", "chunk": map[string]any{"text": map[string]any{"text": "Here you go.", "channel": "CHANNEL_ASSISTANT_RESPONSE"}}}})
 				_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "response.done", "response": map[string]any{"id": "parent_1", "status": "completed"}}})
@@ -1149,7 +1139,8 @@ func TestModelsUseLowestSufficientTierFirst(t *testing.T) {
 		want  []account.WebTier
 	}{
 		{model: "grok-chat-fast", want: []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}},
-		{model: "grok-chat-auto", want: []account.WebTier{account.WebTierSuper, account.WebTierHeavy}},
+		{model: "grok-chat-auto", want: []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}},
+		{model: "grok-chat-build", want: []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}},
 		{model: "grok-chat-expert", want: []account.WebTier{account.WebTierSuper, account.WebTierHeavy}},
 		{model: "grok-chat-heavy", want: []account.WebTier{account.WebTierHeavy}},
 		{model: "grok-imagine-image", want: []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}},
@@ -1182,7 +1173,7 @@ func TestWebVideoTierOrderFollowsConfirmedQuotaProduct(t *testing.T) {
 func TestOnlyChatModelsExposeRateLimitModes(t *testing.T) {
 	for _, spec := range Catalog() {
 		if spec.Capability == modeldomain.CapabilityChat {
-			if !slices.Contains([]string{"auto", "fast", "expert", "heavy"}, spec.Mode) {
+			if !slices.Contains([]string{"auto", "fast", "expert", "heavy", "build"}, spec.Mode) {
 				t.Fatalf("chat model %s has invalid quota mode %q", spec.PublicID, spec.Mode)
 			}
 			continue
