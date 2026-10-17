@@ -24,6 +24,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/searchresult"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/sessionidentity"
 	providerstreamidle "github.com/chenyme/grok2api/backend/internal/infra/provider/streamidle"
+	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -31,7 +32,22 @@ const (
 	gatewayHandshakeTimeout = 20 * time.Second
 	gatewayHeartbeatPeriod  = 25 * time.Second
 	gatewayMaxFrameBytes    = 16 << 20
+	// After response.persisted the answer is already stored upstream. Give a
+	// short grace window for a trailing response.done, then finish instead of
+	// waiting on heartbeats until the total chat timeout.
+	gatewayPersistedGrace = 5 * time.Second
 )
+
+// errGatewayDegraded marks the account-level grok.com degradation where a
+// turn fires a burst of web searches, then ends with response.persisted and
+// no assistant text at all (the browser shows "执行了 N 次搜索 / 正在思考"
+// forever). It wraps ErrUpstreamResponseEmpty so the gateway service treats
+// it as an empty upstream response: the account gets the idle cooldown and
+// the request rotates to another account before any byte reaches the client.
+var errGatewayDegraded = fmt.Errorf("%w: Grok Web 账号降级（只返回搜索工具帧、没有正文）", neterrorpkg.ErrUpstreamResponseEmpty)
+
+// errGatewayEmptyDone marks response.done without any assistant output.
+var errGatewayEmptyDone = fmt.Errorf("%w: Grok Web 响应完成但没有正文", neterrorpkg.ErrUpstreamResponseEmpty)
 
 type gatewayEnvelope struct {
 	SessionID string `json:"session_id"`
@@ -41,7 +57,41 @@ type gatewayEnvelope struct {
 		Conversation  struct {
 			ID string `json:"id"`
 		} `json:"conversation"`
+		Delta string          `json:"delta"`
+		Text  json.RawMessage `json:"text"`
+		Chunk struct {
+			Text *struct {
+				Text    string `json:"text"`
+				Channel string `json:"channel"`
+			} `json:"text"`
+			RenderCitation json.RawMessage `json:"render_citation"`
+		} `json:"chunk"`
+		Output struct {
+			CardAttachment json.RawMessage `json:"card_attachment"`
+		} `json:"output"`
 	} `json:"event"`
+}
+
+// gatewayEnvelopeHasOutput reports whether a frame carries assistant output a
+// client can see: answer text, reasoning text, citations, or a card (image).
+// Tool usage cards / tool results alone are not output.
+func gatewayEnvelopeHasOutput(envelope *gatewayEnvelope) bool {
+	switch envelope.Event.Type {
+	case "response.chunk":
+		if text := envelope.Event.Chunk.Text; text != nil && text.Text != "" {
+			return true
+		}
+		return len(envelope.Event.Chunk.RenderCitation) > 0 && string(envelope.Event.Chunk.RenderCitation) != "null"
+	case "response.output_text.delta":
+		return envelope.Event.Delta != ""
+	case "response.output_text.done":
+		var text string
+		return json.Unmarshal(envelope.Event.Text, &text) == nil && text != ""
+	case "response.grok.output":
+		raw := envelope.Event.Output.CardAttachment
+		return len(raw) > 0 && string(raw) != "null"
+	}
+	return false
 }
 
 type gatewaySender struct {
@@ -52,6 +102,10 @@ type gatewaySender struct {
 type gatewayOpenOptions struct {
 	enforceStreamIdle bool
 	deferForbidden    bool
+	// failOnEmpty ends a text-chat turn as soon as it is clear the upstream
+	// produced no assistant output (degraded search-only turn or empty done),
+	// so the caller can rotate accounts instead of waiting for the timeout.
+	failOnEmpty bool
 }
 
 func (s *gatewaySender) write(value any) error {
@@ -136,7 +190,7 @@ func (a *Adapter) openGatewayChat(ctx context.Context, credential account.Creden
 		_ = connection.Close()
 	}()
 	go func() {
-		streamErr := runGatewayStream(requestCtx, connection, writer, spec.Mode, input.Prompt, attachments, previous)
+		streamErr := runGatewayStream(requestCtx, connection, writer, spec.Mode, input.Prompt, attachments, previous, options.failOnEmpty)
 		cancel()
 		_ = connection.Close()
 		_ = writer.CloseWithError(streamErr)
@@ -228,7 +282,7 @@ func gatewayHandshakeResponse(response *fhttp.Response, endpoint string) *http.R
 	}
 }
 
-func runGatewayStream(ctx context.Context, connection *websocket.Conn, writer io.Writer, model, prompt string, attachments []string, previous *inferencedomain.WebResponseState) error {
+func runGatewayStream(ctx context.Context, connection *websocket.Conn, writer io.Writer, model, prompt string, attachments []string, previous *inferencedomain.WebResponseState, failOnEmpty bool) error {
 	connection.SetReadLimit(gatewayMaxFrameBytes)
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = connection.SetReadDeadline(deadline)
@@ -255,9 +309,16 @@ func runGatewayStream(ctx context.Context, connection *websocket.Conn, writer io
 	created := false
 	attached := false
 	turnSent := false
+	sawOutput := false
+	persisted := false
 	for {
 		messageType, data, err := connection.ReadMessage()
 		if err != nil {
+			if persisted && ctx.Err() == nil {
+				// response.persisted already arrived with output; the trailing
+				// response.done never came within the grace window.
+				return nil
+			}
 			return fmt.Errorf("读取 Grok Gateway: %w", err)
 		}
 		if messageType != websocket.TextMessage {
@@ -270,10 +331,26 @@ func runGatewayStream(ctx context.Context, connection *websocket.Conn, writer io
 		if err := json.Unmarshal(data, &envelope); err != nil {
 			continue
 		}
+		if gatewayEnvelopeHasOutput(&envelope) {
+			sawOutput = true
+		}
+		if failOnEmpty && !sawOutput {
+			switch envelope.Event.Type {
+			case "response.persisted":
+				return errGatewayDegraded
+			case "response.done":
+				return errGatewayEmptyDone
+			}
+		}
 		if _, err := writer.Write(append(append([]byte(nil), data...), '\n')); err != nil {
 			return err
 		}
 		switch envelope.Event.Type {
+		case "response.persisted":
+			if failOnEmpty && !persisted {
+				persisted = true
+				_ = connection.SetReadDeadline(time.Now().Add(gatewayPersistedGrace))
+			}
 		case "session.created":
 			if envelope.Event.ClientEventID != "" && envelope.Event.ClientEventID != initialEventID {
 				continue
@@ -326,16 +403,20 @@ func gatewayHeartbeat(sender *gatewaySender, done <-chan struct{}) {
 
 func gatewaySession(model string, previous *inferencedomain.WebResponseState) map[string]any {
 	xGrok := map[string]any{
-		"protocol_capabilities": []string{"conversation_attached", "custom_methods_v1"},
-		"use_chunk":             true, "enable_side_by_side": true, "force_side_by_side": false,
+		// Mirrors the current grok.com browser session.create. The browser also
+		// sends client_side_toolsets (connectors-v3, location); those are tools
+		// the client must execute, which this proxy cannot answer, so they are
+		// deliberately omitted. keep_context/is_temporary/disable_memory are not
+		// sent by the browser any more; with them a fast turn was observed to
+		// end immediately with an empty response.done on healthy accounts.
+		"protocol_capabilities":     []string{"conversation_attached", "custom_methods_v1", "workspace_servers_v1"},
+		"use_chunk":                 true,
+		"accept_interleaved_phases": true,
+		"enable_side_by_side":       true, "force_side_by_side": false,
 		"enable_image_generation": true, "image_generation_count": 2,
 		"disable_text_follow_ups": false, "disable_artifact": true, "force_concise": false,
 	}
-	if previous == nil {
-		xGrok["keep_context"] = false
-		xGrok["is_temporary"] = true
-		xGrok["disable_memory"] = true
-	} else {
+	if previous != nil {
 		xGrok["conversation_id"] = previous.ConversationID
 		xGrok["load_existing"] = true
 		xGrok["needs_history"] = false
