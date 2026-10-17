@@ -25,6 +25,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/searchresult"
+	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 )
 
 const webResponseTTL = 30 * 24 * time.Hour
@@ -254,7 +255,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		if attempt > 0 {
 			attemptCtx = infraegress.WithPhysicalCallStage(ctx, "anti_bot_retry")
 		}
-		upstream, lease, currentPrevious, statsigTarget, openErr := a.openChat(attemptCtx, request.Credential, input.PreviousResponseID, spec, normalized, gatewayOpenOptions{enforceStreamIdle: true})
+		upstream, lease, currentPrevious, statsigTarget, openErr := a.openChat(attemptCtx, request.Credential, input.PreviousResponseID, spec, normalized, gatewayOpenOptions{enforceStreamIdle: true, failOnEmpty: true})
 		if openErr != nil {
 			if errors.Is(openErr, errInvalidChatAttachment) || errors.Is(openErr, errInvalidChatImage) || errors.Is(openErr, errInvalidChatFile) {
 				code := "invalid_attachment_input"
@@ -341,6 +342,11 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 				a.feedbackAntiBot(ctx, lease, statsigTarget)
 				return antiBotProviderResponse(), nil
 			}
+			if neterrorpkg.IsUpstreamResponseEmpty(consumeErr) {
+				// Account-level degradation: the egress node worked fine.
+				a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusOK, nil)
+				return nil, consumeErr
+			}
 			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, consumeErr)
 			return nil, consumeErr
 		}
@@ -382,7 +388,8 @@ func (a *Adapter) feedbackAntiBot(ctx context.Context, lease *infraegress.Lease,
 func preflightUpstream(source io.ReadCloser) (io.ReadCloser, error) {
 	reader := bufio.NewReaderSize(source, 64<<10)
 	var prefetched bytes.Buffer
-	for prefetched.Len() <= 1<<20 {
+	sawGateway := false
+	for prefetched.Len() <= 4<<20 {
 		line, err := reader.ReadString('\n')
 		if line != "" {
 			prefetched.WriteString(line)
@@ -400,7 +407,16 @@ func preflightUpstream(source io.ReadCloser) (io.ReadCloser, error) {
 						if event["type"] == "error" {
 							return nil, gatewayEventError(event)
 						}
-						return &readerCloser{Reader: io.MultiReader(bytes.NewReader(prefetched.Bytes()), reader), closer: source}, nil
+						// Gateway frames: hold (session/tool frames) until the first
+						// assistant output or a terminal event, so a degraded
+						// search-only turn fails here and the request can still
+						// rotate to another account before 200 is committed.
+						sawGateway = true
+						var envelope gatewayEnvelope
+						if json.Unmarshal([]byte(trimmed), &envelope) == nil && (gatewayEnvelopeHasOutput(&envelope) || envelope.Event.Type == "response.done") {
+							return &readerCloser{Reader: io.MultiReader(bytes.NewReader(prefetched.Bytes()), reader), closer: source}, nil
+						}
+						continue
 					}
 					if result, ok := root["result"].(map[string]any); ok && (result["conversation"] != nil || result["response"] != nil) {
 						return &readerCloser{Reader: io.MultiReader(bytes.NewReader(prefetched.Bytes()), reader), closer: source}, nil
@@ -414,6 +430,9 @@ func preflightUpstream(source io.ReadCloser) (io.ReadCloser, error) {
 			}
 			return nil, err
 		}
+	}
+	if sawGateway {
+		return &readerCloser{Reader: io.MultiReader(bytes.NewReader(prefetched.Bytes()), reader), closer: source}, nil
 	}
 	return nil, fmt.Errorf("Grok Web 首个流事件超过安全检查上限")
 }
