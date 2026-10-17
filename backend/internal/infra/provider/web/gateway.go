@@ -374,11 +374,7 @@ func runGatewayStream(ctx context.Context, connection *websocket.Conn, writer io
 		}
 		if created && attached && !turnSent {
 			turnSent = true
-			item, response := gatewayTurnEvents(currentSessionID, prompt, attachments, previous)
-			if err := sender.write(item); err != nil {
-				return fmt.Errorf("发送 Grok Gateway conversation.item.create: %w", err)
-			}
-			if err := sender.write(response); err != nil {
+			if err := sender.write(gatewayTurnEvent(currentSessionID, prompt, attachments, previous)); err != nil {
 				return fmt.Errorf("发送 Grok Gateway response.create: %w", err)
 			}
 		}
@@ -424,7 +420,17 @@ func gatewaySession(model string, previous *inferencedomain.WebResponseState) ma
 	return map[string]any{"model": model, "x_grok": xGrok}
 }
 
-func gatewayTurnEvents(sessionID, prompt string, attachments []string, previous *inferencedomain.WebResponseState) (map[string]any, map[string]any) {
+// gatewayTurnEvent builds the single user-turn event grok.com's web client
+// sends for a text turn: one response.create carrying the user item inline.
+// conversation.item.create is the realtime/voice path; splitting a text turn
+// into item.create + a bare response.create makes Gateway finish instantly
+// with an empty response.done whenever attachments are present, so images
+// were never read. Verified live: attachments are only seen when ALL of these
+// hold, mirroring the web client's buildWireInputChunks/_sendUserTurnAsync:
+//   - one fileMention input chunk per attachment, before the text chunk;
+//   - file_attachment_ids on the item;
+//   - file_attachment_ids on the response.create event.
+func gatewayTurnEvent(sessionID, prompt string, attachments []string, previous *inferencedomain.WebResponseState) map[string]any {
 	chunks := make([]any, 0, len(attachments)+1)
 	for _, attachment := range attachments {
 		chunks = append(chunks, map[string]any{"mention": map[string]any{"target": map[string]any{"file_mention": map[string]any{"file_id": attachment}}}})
@@ -434,27 +440,18 @@ func gatewayTurnEvents(sessionID, prompt string, attachments []string, previous 
 		"type": "message", "role": "user",
 		"x_grok": map[string]any{"client_message_id": newRequestUUID(), "input_chunks": chunks},
 	}
-	if len(attachments) > 0 {
-		item["file_attachment_ids"] = attachments
-	}
-	now := time.Now().UnixMilli()
-	itemEvent := map[string]any{
-		"session_id": sessionID,
-		"event": map[string]any{
-			"type": "conversation.item.create", "event_id": fmt.Sprintf("evt_msg_%d", now), "item": item,
-		},
+	event := map[string]any{
+		"type": "response.create", "event_id": fmt.Sprintf("evt_resp_%d", time.Now().UnixMilli()), "item": item,
 	}
 	if previous != nil {
-		itemEvent["event"].(map[string]any)["parent_response_id"] = previous.UpstreamParentResponseID
+		event["parent_response_id"] = previous.UpstreamParentResponseID
 	}
 	if len(attachments) > 0 {
-		itemEvent["event"].(map[string]any)["file_attachment_ids"] = attachments
+		ids := append([]string(nil), attachments...)
+		item["file_attachment_ids"] = ids
+		event["file_attachment_ids"] = ids
 	}
-	responseEvent := map[string]any{
-		"session_id": sessionID,
-		"event":      map[string]any{"type": "response.create", "event_id": fmt.Sprintf("evt_resp_%d", now)},
-	}
-	return itemEvent, responseEvent
+	return map[string]any{"session_id": sessionID, "event": event}
 }
 
 func parseGatewayEvent(event map[string]any, parsed *parsedChat) (string, string, error) {
