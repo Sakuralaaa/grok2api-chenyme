@@ -44,8 +44,8 @@ func fakeGatewayServer(t *testing.T, afterTurn func(*websocket.Conn)) *fhttptest
 		initialID := initial["event"].(map[string]any)["event_id"].(string)
 		_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "session.created", "client_event_id": initialID}})
 		_ = connection.WriteJSON(map[string]any{"session_id": "conv_1", "event": map[string]any{"type": "conversation.attached", "conversation": map[string]any{"id": "conv_1"}}})
-		var item, create map[string]any
-		if connection.ReadJSON(&item) != nil || connection.ReadJSON(&create) != nil {
+		var create map[string]any
+		if connection.ReadJSON(&create) != nil {
 			return
 		}
 		afterTurn(connection)
