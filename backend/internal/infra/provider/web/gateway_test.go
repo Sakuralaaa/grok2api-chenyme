@@ -47,26 +47,34 @@ func TestGatewaySessionSupportsNewAndExistingConversations(t *testing.T) {
 	}
 }
 
-func TestGatewayTurnEventsOmitCastleAndPreserveAttachments(t *testing.T) {
+func TestGatewayTurnEventMatchesWebClientAndPreservesAttachments(t *testing.T) {
 	previous := &inferencedomain.WebResponseState{UpstreamParentResponseID: "response-1"}
-	item, response := gatewayTurnEvents("conversation-1", "hello", []string{"file-1"}, previous)
-	itemEvent := item["event"].(map[string]any)
-	if item["session_id"] != "conversation-1" || itemEvent["parent_response_id"] != "response-1" {
-		t.Fatalf("item event = %#v", item)
+	turn := gatewayTurnEvent("conversation-1", "hello", []string{"file-1"}, previous)
+	event := turn["event"].(map[string]any)
+	if turn["session_id"] != "conversation-1" || event["type"] != "response.create" || event["parent_response_id"] != "response-1" {
+		t.Fatalf("turn event = %#v", turn)
 	}
-	encoded, err := json.Marshal(item)
+	if _, ok := event["item"].(map[string]any); !ok {
+		t.Fatalf("response.create must carry the user item inline: %#v", event)
+	}
+	encoded, err := json.Marshal(turn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(encoded)
-	for _, expected := range []string{`"file_attachment_ids":["file-1"]`, `"file_mention":{"file_id":"file-1"}`, `"text":{"text":"hello"}`} {
-		if !strings.Contains(text, expected) {
-			t.Fatalf("item JSON %s missing %s", text, expected)
+	if strings.Count(text, `"file_attachment_ids":["file-1"]`) != 2 {
+		t.Fatalf("turn JSON %s must reference the attachment on the event and the item", text)
+	}
+	if !strings.Contains(text, `"file_mention":{"file_id":"file-1"}`) {
+		t.Fatalf("turn JSON %s missing file mention chunk", text)
+	}
+	for _, unexpected := range []string{"castle_request_token", "conversation.item.create"} {
+		if strings.Contains(text, unexpected) {
+			t.Fatalf("turn JSON %s unexpectedly contains %s", text, unexpected)
 		}
 	}
-	responseJSON, _ := json.Marshal(response)
-	if strings.Contains(string(responseJSON), "castle_request_token") {
-		t.Fatalf("response.create unexpectedly contains Castle token: %s", responseJSON)
+	if !strings.Contains(text, `"text":{"text":"hello"}`) {
+		t.Fatalf("turn JSON %s missing prompt", text)
 	}
 }
 
