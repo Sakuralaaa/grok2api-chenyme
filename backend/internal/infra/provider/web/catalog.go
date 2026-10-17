@@ -17,8 +17,14 @@ type ModelSpec struct {
 
 var catalog = []ModelSpec{
 	{PublicID: "grok-chat-fast", UpstreamModel: "grok-chat-fast", Capability: modeldomain.CapabilityChat, Mode: "fast", MinimumTier: account.WebTierBasic},
-	{PublicID: "grok-chat-auto", UpstreamModel: "grok-chat-auto", Capability: modeldomain.CapabilityChat, Mode: "auto", MinimumTier: account.WebTierSuper},
+	// Basic accounts can use Auto upstream (7 queries per 24h window); gating it
+	// to Super made grok-chat-auto unroutable for free pools.
+	{PublicID: "grok-chat-auto", UpstreamModel: "grok-chat-auto", Capability: modeldomain.CapabilityChat, Mode: "auto", MinimumTier: account.WebTierBasic},
 	{PublicID: "grok-chat-expert", UpstreamModel: "grok-chat-expert", Capability: modeldomain.CapabilityChat, Mode: "expert", MinimumTier: account.WebTierSuper},
+	// Build is the grok.com composer's "Build" mode (session model "build"), not
+	// the Grok Build CLI route. It has its own rate-limit window (Basic: 10 per
+	// 2h) and streams the normal Gateway text channel.
+	{PublicID: "grok-chat-build", UpstreamModel: "grok-chat-build", Capability: modeldomain.CapabilityChat, Mode: "build", MinimumTier: account.WebTierBasic},
 	{PublicID: "grok-chat-heavy", UpstreamModel: "grok-chat-heavy", Capability: modeldomain.CapabilityChat, Mode: "heavy", MinimumTier: account.WebTierHeavy},
 	// Lite keeps the distinct fast/chat product name. Imagine WebSocket models
 	// share the Console-facing product names but select their protocol version
