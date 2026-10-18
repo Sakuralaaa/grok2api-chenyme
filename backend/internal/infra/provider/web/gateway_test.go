@@ -65,11 +65,11 @@ func TestGatewayTurnEventMatchesWebClientAndPreservesAttachments(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(encoded)
-	if strings.Count(text, `"file_attachment_ids":["file-1"]`) != 2 {
-		t.Fatalf("turn JSON %s must reference the attachment on the event and the item", text)
+	if strings.Count(text, `"file_attachment_ids":["file-1"]`) != 1 || event["file_attachment_ids"] == nil {
+		t.Fatalf("turn JSON %s must reference the attachment on the event only (browser shape)", text)
 	}
-	if !strings.Contains(text, `"file_mention":{"file_id":"file-1"}`) {
-		t.Fatalf("turn JSON %s missing file mention chunk", text)
+	if !strings.Contains(text, `"mention":{"file_mention":{"file_id":"file-1"}}`) || strings.Contains(text, `"target"`) {
+		t.Fatalf("turn JSON %s must carry the flattened protobuf mention chunk", text)
 	}
 	for _, unexpected := range []string{"castle_request_token", "conversation.item.create"} {
 		if strings.Contains(text, unexpected) {
