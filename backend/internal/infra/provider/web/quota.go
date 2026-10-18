@@ -50,8 +50,23 @@ func (a *Adapter) SyncQuota(ctx context.Context, credential account.Credential) 
 		// known authoritative media quotas.
 		return provider.QuotaSnapshot{}, imagineErr
 	}
+	// 套餐等级以上游 /rest/subscriptions 为准；接口失败或套餐权益未知时才退回
+	// 额度形态推断，避免上游调整额度数字后把付费号误判成 Basic（或反之）。
+	planTier, planKnown, planErr := a.syncSubscriptionTier(ctx, credential)
+	if planErr != nil && errors.Is(planErr, provider.ErrUnauthorized) && autoErr == nil {
+		// rate-limits 刚以同一凭据成功，订阅接口的 401 不足以判定账号失效。
+		planKnown = false
+	} else if errors.Is(planErr, provider.ErrUnauthorized) {
+		return provider.QuotaSnapshot{}, planErr
+	}
+	if planKnown {
+		credential.WebTier = planTier
+	}
 	if len(chatWindows) > 0 {
-		tier, _ := resolveWebTierFromQuota(credential.WebTier, chatWindows, false)
+		tier := planTier
+		if !planKnown {
+			tier, _ = resolveWebTierFromQuota(credential.WebTier, chatWindows, false)
+		}
 		var windows []account.QuotaWindow
 		// Basic/未知账号没有付费周池，避免为每次完整同步额外访问付费端点。
 		// 只有模式额度已经确认付费等级时才读取 weekly 作为权威额度。
@@ -222,18 +237,20 @@ func decodeImagineQuotaSnapshot(body []byte, accountID uint64, now time.Time) ([
 		if *product.Available && product.RemainingQueries != nil {
 			remaining = max(0, *product.RemainingQueries)
 		}
-		windowSeconds := 86400
+		// 不臆造窗口长度：上游未给 windowSizeSeconds（通常是 available=false 的
+		// 不可用产品）时窗口记为 0、无预测重置时间，由下一次完整同步刷新。
+		windowSeconds := 0
 		if product.WindowSizeSeconds != nil {
 			windowSeconds = *product.WindowSizeSeconds
-		}
-		if windowSeconds <= 0 {
-			return nil, fmt.Errorf("Grok Web Imagine 配额字段 %s 的 windowSizeSeconds 无效", item.field)
+			if windowSeconds <= 0 {
+				return nil, fmt.Errorf("Grok Web Imagine 配额字段 %s 的 windowSizeSeconds 无效", item.field)
+			}
 		}
 		var resetAt *time.Time
 		if product.NextAvailableAt != nil {
 			value := product.NextAvailableAt.UTC()
 			resetAt = &value
-		} else {
+		} else if windowSeconds > 0 {
 			// Imagine exposes the quota-window length but omits its anchor while
 			// the product is available. Match Web chat quota semantics by using
 			// the observation time as the rolling prediction anchor; every sync
@@ -298,11 +315,10 @@ func inferWebTierFromQuota(windows []account.QuotaWindow) (account.WebTier, bool
 			case 400:
 				candidate = account.WebTierHeavy
 			}
-		case "heavy":
-			if window.Total > 0 {
-				candidate = account.WebTierHeavy
-			}
 		}
+		// 注意：不能用 heavy/expert 窗口判级。实测 Basic 账号的 /rest/rate-limits
+		// 同样返回 heavy 20/7200s、expert 7/86400s，但实际调用直接 stream_error，
+		// 这些数值只是上游默认值，不代表权益。
 		if candidate != account.WebTierAuto && (detected == account.WebTierAuto || rank[candidate] < rank[detected]) {
 			detected = candidate
 		}
@@ -386,25 +402,69 @@ func (a *Adapter) SyncQuotaMode(ctx context.Context, credential account.Credenti
 		return account.QuotaWindow{}, fmt.Errorf("Grok Web 额度接口返回 %d", response.StatusCode)
 	}
 	a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
+	return parseRateLimitsResponse(body, credential.ID, mode, time.Now().UTC())
+}
+
+// parseRateLimitsResponse 完全依据上游 /rest/rate-limits 的字段构造额度窗口，
+// 不注入任何本地默认值：
+//   - 总量/剩余优先取 totalQueries/remainingQueries，按 token 计量的模式退回
+//     totalTokens/remainingTokens（与 grok.com 前端 useRateLimits 一致）；
+//   - 额度耗尽时上游给出 waitTimeSeconds，即距真实恢复的秒数，优先作为重置时间；
+//   - 否则上游只给滚动窗口长度、不给锚点，以观测时间 + windowSizeSeconds 作为
+//     保守预测，每次同步都会被新的上游数据覆盖。
+func parseRateLimitsResponse(body []byte, accountID uint64, mode string, now time.Time) (account.QuotaWindow, error) {
 	var value struct {
-		WindowSizeSeconds int `json:"windowSizeSeconds"`
-		RemainingQueries  int `json:"remainingQueries"`
-		TotalQueries      int `json:"totalQueries"`
+		WindowSizeSeconds *int `json:"windowSizeSeconds"`
+		RemainingQueries  *int `json:"remainingQueries"`
+		TotalQueries      *int `json:"totalQueries"`
+		RemainingTokens   *int `json:"remainingTokens"`
+		TotalTokens       *int `json:"totalTokens"`
+		WaitTimeSeconds   *int `json:"waitTimeSeconds"`
 	}
 	if err := json.Unmarshal(body, &value); err != nil {
-		return account.QuotaWindow{}, err
+		return account.QuotaWindow{}, fmt.Errorf("解析 Grok Web 额度响应: %w", err)
 	}
-	if value.TotalQueries <= 0 {
+	total, remaining := 0, 0
+	switch {
+	case value.TotalQueries != nil && *value.TotalQueries > 0:
+		total = *value.TotalQueries
+		if value.RemainingQueries != nil {
+			remaining = *value.RemainingQueries
+		}
+	case value.TotalTokens != nil && *value.TotalTokens > 0:
+		total = *value.TotalTokens
+		if value.RemainingTokens != nil {
+			remaining = *value.RemainingTokens
+		}
+	default:
 		return account.QuotaWindow{}, fmt.Errorf("Grok Web 额度响应缺少 totalQueries")
 	}
-	if value.WindowSizeSeconds <= 0 {
-		value.WindowSizeSeconds = 7200
+	remaining = min(max(0, remaining), total)
+	windowSeconds := 0
+	if value.WindowSizeSeconds != nil && *value.WindowSizeSeconds > 0 {
+		windowSeconds = *value.WindowSizeSeconds
 	}
-	now := time.Now().UTC()
-	resetAt := now.Add(time.Duration(value.WindowSizeSeconds) * time.Second)
+	waitSeconds := 0
+	if value.WaitTimeSeconds != nil && *value.WaitTimeSeconds > 0 {
+		waitSeconds = *value.WaitTimeSeconds
+	}
+	var resetAt time.Time
+	switch {
+	case remaining == 0 && waitSeconds > 0:
+		resetAt = now.Add(time.Duration(waitSeconds) * time.Second)
+	case windowSeconds > 0:
+		resetAt = now.Add(time.Duration(windowSeconds) * time.Second)
+	case waitSeconds > 0:
+		resetAt = now.Add(time.Duration(waitSeconds) * time.Second)
+	default:
+		return account.QuotaWindow{}, fmt.Errorf("Grok Web 额度响应缺少 windowSizeSeconds")
+	}
+	if windowSeconds == 0 {
+		windowSeconds = waitSeconds
+	}
 	return account.QuotaWindow{
-		AccountID: credential.ID, Mode: mode, Remaining: max(0, value.RemainingQueries), Total: value.TotalQueries,
-		WindowSeconds: value.WindowSizeSeconds, ResetAt: &resetAt, SyncedAt: &now, Source: account.QuotaSourceUpstream, UpdatedAt: now,
+		AccountID: accountID, Mode: mode, Remaining: remaining, Total: total,
+		WindowSeconds: windowSeconds, ResetAt: &resetAt, SyncedAt: &now, Source: account.QuotaSourceUpstream, UpdatedAt: now,
 	}, nil
 }
 
