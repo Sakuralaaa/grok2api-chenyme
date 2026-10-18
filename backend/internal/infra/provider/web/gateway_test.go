@@ -36,13 +36,16 @@ func TestGatewayEndpointAndHeadersMatchBrowserProtocol(t *testing.T) {
 func TestGatewaySessionSupportsNewAndExistingConversations(t *testing.T) {
 	fresh := gatewaySession("fast", nil)
 	freshXGrok := fresh["x_grok"].(map[string]any)
-	if fresh["model"] != "fast" || freshXGrok["is_temporary"] != nil || freshXGrok["keep_context"] != nil || freshXGrok["disable_memory"] != nil || freshXGrok["load_existing"] != nil || freshXGrok["accept_interleaved_phases"] != true || freshXGrok["client_side_toolsets"] != nil {
+	// A new API conversation is private and unlisted: temporary, with memory and
+	// personalization off so callers sharing an account never cross-contaminate.
+	if fresh["model"] != "fast" || freshXGrok["is_temporary"] != true || freshXGrok["disable_memory"] != true || freshXGrok["disable_personalization"] != true || freshXGrok["keep_context"] != nil || freshXGrok["load_existing"] != nil || freshXGrok["accept_interleaved_phases"] != true || freshXGrok["client_side_toolsets"] != nil {
 		t.Fatalf("fresh session = %#v", fresh)
 	}
 	previous := &inferencedomain.WebResponseState{ConversationID: "conversation-1", UpstreamParentResponseID: "response-1"}
 	existing := gatewaySession("expert", previous)
 	existingXGrok := existing["x_grok"].(map[string]any)
-	if existing["model"] != "expert" || existingXGrok["conversation_id"] != "conversation-1" || existingXGrok["load_existing"] != true || existingXGrok["needs_history"] != false {
+	// A continued conversation keeps its history, so it is not marked temporary.
+	if existing["model"] != "expert" || existingXGrok["conversation_id"] != "conversation-1" || existingXGrok["load_existing"] != true || existingXGrok["needs_history"] != false || existingXGrok["is_temporary"] != nil {
 		t.Fatalf("existing session = %#v", existing)
 	}
 }
@@ -95,6 +98,13 @@ func TestParseGatewayEventsCollectsConversationTextAndParent(t *testing.T) {
 		}
 		if kind == "text" {
 			emitted.WriteString(delta)
+		}
+		// Response-phase text is buffered and released through the emit queue;
+		// drain it the way the streaming consumer does.
+		for _, queued := range parsed.takeEmits() {
+			if queued.kind == "text" {
+				emitted.WriteString(queued.delta)
+			}
 		}
 	}
 	if parsed.ConversationID != "conversation-1" || parsed.ParentID != "response-1" || parsed.Text.String() != "TOKENLESS" || emitted.String() != "TOKENLESS" || parsed.Reasoning.String() != "thought" {
@@ -196,13 +206,26 @@ func TestParseGatewayChunkCollectsToolResultsAndRenderCitations(t *testing.T) {
 	if len(out) < 3 {
 		t.Fatalf("output should include search calls + message: %#v", out)
 	}
-	if out[0].(map[string]any)["type"] != "web_search_call" {
-		t.Fatalf("first output item = %#v", out[0])
+	// A reasoning item (the thinking trace) may precede the search calls; locate
+	// the hosted search calls by type rather than by a fixed index.
+	var webCall, xCall map[string]any
+	var webIdx, xIdx = -1, -1
+	for i, item := range out {
+		m := item.(map[string]any)
+		switch m["type"] {
+		case "web_search_call":
+			webCall, webIdx = m, i
+		case "x_search_call":
+			xCall, xIdx = m, i
+		}
 	}
-	if out[1].(map[string]any)["type"] != "x_search_call" {
-		t.Fatalf("second output item = %#v", out[1])
+	if webCall == nil || xCall == nil {
+		t.Fatalf("output missing hosted search calls: %#v", out)
 	}
-	webAction := out[0].(map[string]any)["action"].(map[string]any)
+	if webIdx > xIdx {
+		t.Fatalf("web_search_call should precede x_search_call: %#v", out)
+	}
+	webAction := webCall["action"].(map[string]any)
 	if webAction["type"] != "search" || webAction["query"] == nil {
 		t.Fatalf("web action = %#v", webAction)
 	}
