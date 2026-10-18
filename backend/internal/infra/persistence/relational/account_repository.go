@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -116,6 +117,7 @@ func (r *AccountRepository) List(ctx context.Context, input repository.AccountLi
 	}
 	query = applyWebAgreementFilter(query, input.Filter.Agreement)
 	query = applyAssociationFilter(query, input.Filter.Provider, input.Filter.Association)
+	query = applyEmailDomainFilter(query, input.Filter.EmailDomain)
 	if input.Filter.RestrictIDs {
 		if len(input.Filter.AccountIDs) == 0 {
 			query = query.Where("1 = 0")
@@ -154,6 +156,65 @@ func (r *AccountRepository) List(ctx context.Context, input repository.AccountLi
 		return nil, 0, err
 	}
 	return out, total, nil
+}
+
+// applyEmailDomainFilter narrows by the email's domain. The domain is
+// validated by the application layer to [a-z0-9.-], so it carries no LIKE
+// wildcards.
+func applyEmailDomainFilter(query *gorm.DB, domain string) *gorm.DB {
+	switch domain = strings.ToLower(strings.TrimSpace(domain)); domain {
+	case "":
+		return query
+	case repository.EmailDomainNone:
+		return query.Where("(provider_accounts.email IS NULL OR TRIM(provider_accounts.email) = '' OR provider_accounts.email NOT LIKE '%@%')")
+	default:
+		return query.Where("LOWER(TRIM(provider_accounts.email)) LIKE ?", "%@"+domain)
+	}
+}
+
+// ListEmailDomains counts accounts per registered email domain for one
+// provider (all providers when empty). Accounts without an email are counted
+// under repository.EmailDomainNone.
+func (r *AccountRepository) ListEmailDomains(ctx context.Context, providerValue string) ([]repository.EmailDomainCount, error) {
+	query := r.db.db.WithContext(ctx).Model(&accountModel{})
+	if providerValue != "" {
+		query = query.Where("provider = ?", providerValue)
+	}
+	var emails []string
+	if err := query.Pluck("email", &emails).Error; err != nil {
+		return nil, err
+	}
+	return countEmailDomains(emails), nil
+}
+
+func countEmailDomains(emails []string) []repository.EmailDomainCount {
+	counts := make(map[string]int64)
+	for _, email := range emails {
+		counts[emailDomainOf(email)]++
+	}
+	out := make([]repository.EmailDomainCount, 0, len(counts))
+	for domain, count := range counts {
+		out = append(out, repository.EmailDomainCount{Domain: domain, Count: count})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if (out[i].Domain == repository.EmailDomainNone) != (out[j].Domain == repository.EmailDomainNone) {
+			return out[j].Domain == repository.EmailDomainNone
+		}
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Domain < out[j].Domain
+	})
+	return out
+}
+
+func emailDomainOf(email string) string {
+	email = strings.ToLower(strings.TrimSpace(email))
+	at := strings.LastIndex(email, "@")
+	if at < 0 || at == len(email)-1 {
+		return repository.EmailDomainNone
+	}
+	return email[at+1:]
 }
 
 func (r *AccountRepository) ListProviderAccountBatch(ctx context.Context, providerValue account.Provider, afterID uint64, limit int) ([]account.Credential, int64, error) {
