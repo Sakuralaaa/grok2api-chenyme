@@ -169,6 +169,9 @@ type parsedChat struct {
 	respPhaseBuf         strings.Builder
 	respPhaseLive        bool
 	pendingEmits         []pendingEmit
+	// browsedURLs are pages the turn opened with browse_page; links to them in
+	// the final answer count as citations.
+	browsedURLs []string
 }
 
 type pendingEmit struct {
@@ -467,6 +470,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	if err := a.archiveChatImages(ctx, request.Credential, &parsed); err != nil {
 		return nil, err
 	}
+	a.logWebTurnSummary(request.Credential.ID, input.Model, request.Operation, false, &parsed)
 	payload := buildOpenAIResult(request.Operation, responseID, input.Model, parsed, false, conversationOptions)
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -741,6 +745,13 @@ func (a *Adapter) streamOpenAIResponse(ctx context.Context, source io.ReadCloser
 			}
 		}
 		parsed.resetText(clientText.String())
+		if operation == conversation.OperationChat {
+			deriveLinkAnnotations(parsed)
+			if annErr := flushAnnotations(); annErr != nil {
+				_ = writer.CloseWithError(annErr)
+				return
+			}
+		}
 		if operation == conversation.OperationResponses {
 			finalizeXAIAnnotations(parsed)
 			if finishErr := responsesStream.Finish(parsed); finishErr != nil {
@@ -749,6 +760,7 @@ func (a *Adapter) streamOpenAIResponse(ctx context.Context, source io.ReadCloser
 			}
 		}
 		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusOK, nil)
+		a.logWebTurnSummary(credential.ID, model, operation, true, parsed)
 		payload := buildOpenAIResult(operation, responseID, model, *parsed, false, options)
 		data, _ := json.Marshal(payload)
 		if operation == conversation.OperationResponses {
@@ -2229,6 +2241,7 @@ func finalizeXAIAnnotations(parsed *parsedChat) {
 	if parsed == nil {
 		return
 	}
+	deriveLinkAnnotations(parsed)
 	if !parsed.DisableInlineCitations {
 		return
 	}
