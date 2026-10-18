@@ -51,7 +51,9 @@ import {
   importAccounts,
   importConsoleAccounts,
   importWebAccounts,
+  listAccountEmailDomains,
   listAccounts,
+  accountEmailDomainNone,
   pollDeviceAuthorization,
   refreshAccountBilling,
   refreshAccountsQuota,
@@ -140,6 +142,7 @@ export function AccountsPage() {
   const [renewalFilter, setRenewalFilter] = useState("");
   const [riskFilter, setRiskFilter] = useState("");
   const [agreementFilter, setAgreementFilter] = useState("");
+  const [emailDomainFilter, setEmailDomainFilter] = useState("");
   const [associationFilter, setAssociationFilter] = useState("");
   const [sort, setSort] = useState<TableSort>({ field: "createdAt", order: "desc" });
   const [selection, setSelection] = useState<AccountSelection>(() => ({ provider: "grok_build", ids: new Set() }));
@@ -234,14 +237,20 @@ export function AccountsPage() {
   const selected = selection.provider === provider ? selection.ids : new Set<string>();
   const selectedIdsKey = Array.from(selected).sort().join(",");
 
+  const emailDomainsQuery = useQuery({
+    queryKey: ["accounts", "email-domains", provider],
+    queryFn: () => listAccountEmailDomains(provider),
+    staleTime: 60_000,
+  });
   const accountsQuery = useQuery({
-    queryKey: ["accounts", provider, page, pageSize, debouncedSearch, typeFilter, statusFilter, egressFilter, renewalFilter, riskFilter, agreementFilter, associationFilter, sort.field, sort.order],
+    queryKey: ["accounts", provider, page, pageSize, debouncedSearch, typeFilter, statusFilter, egressFilter, renewalFilter, riskFilter, agreementFilter, associationFilter, emailDomainFilter, sort.field, sort.order],
     queryFn: () => listAccounts({
       provider, page, pageSize, search: debouncedSearch, type: typeFilter, status: statusFilter, egress: egressFilter,
       renewal: provider === "grok_build" ? renewalFilter : undefined,
       risk: provider === "grok_build" ? riskFilter : undefined,
       agreement: provider === "grok_web" ? agreementFilter : undefined,
       association: associationFilter || undefined,
+      emailDomain: emailDomainFilter || undefined,
       sortBy: sort.field, sortOrder: sort.order,
     }),
   });
@@ -1019,6 +1028,7 @@ export function AccountsPage() {
     setRiskFilter("");
     setAgreementFilter("");
     setAssociationFilter("");
+    setEmailDomainFilter("");
     setQuickImportOpen(false);
     setQuickImportTokens("");
     // Cleanup dialog state is provider-scoped: linked targets from another pool
@@ -1405,6 +1415,13 @@ export function AccountsPage() {
                   { value: "allAccepted", label: t("accounts.agreementAllAccepted") },
                   { value: "allNotAccepted", label: t("accounts.agreementAllNotAccepted") },
                 ] }] : []),
+                { id: "emailDomain", label: t("accounts.emailDomainFilter"), value: emailDomainFilter, scrollable: true, onChange: (value: string) => { setEmailDomainFilter(value); setPage(1); }, options: [
+                  ...(emailDomainFilter && !(emailDomainsQuery.data ?? []).some((item) => item.domain === emailDomainFilter) ? [{ value: emailDomainFilter, label: emailDomainFilter === accountEmailDomainNone ? t("accounts.emailDomainNone") : emailDomainFilter }] : []),
+                  ...(emailDomainsQuery.data ?? []).map((item) => ({
+                    value: item.domain,
+                    label: `${item.domain === accountEmailDomainNone ? t("accounts.emailDomainNone") : item.domain} (${item.count})`,
+                  })),
+                ] },
                 { id: "association", label: t("accounts.associationFilter"), value: associationFilter, onChange: (value: string) => { setAssociationFilter(value); setPage(1); }, options: provider === "grok_web" ? [
                   { value: "buildLinked", label: t("accounts.associationBuildLinked") },
                   { value: "buildUnlinked", label: t("accounts.associationBuildUnlinked") },
