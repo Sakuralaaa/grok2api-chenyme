@@ -85,12 +85,24 @@ type AccountListFilter struct {
 	// Association filters accounts by link-table bindings: grok_web supports
 	// build/console/all values; grok_build and grok_console support webLinked/webUnlinked.
 	Association string
+	// EmailDomain filters by the registered email's domain (lowercase, no
+	// "@"). EmailDomainNone selects accounts without an email.
+	EmailDomain string
 	AccountIDs  []uint64
 	RestrictIDs bool
 	ExcludeIDs  []uint64
 	AfterID     uint64
 	ThroughID   uint64
 	Now         time.Time
+}
+
+// EmailDomainNone is the EmailDomain filter value for accounts with no email.
+const EmailDomainNone = "__none__"
+
+// EmailDomainCount is one email domain and how many accounts use it.
+type EmailDomainCount struct {
+	Domain string
+	Count  int64
 }
 
 type AccountListQuery struct {
