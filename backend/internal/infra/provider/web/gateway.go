@@ -38,6 +38,27 @@ const (
 	gatewayPersistedGrace = 5 * time.Second
 )
 
+// errGatewayNoOutputStall marks a turn that produced no assistant text within
+// the mode's first-output budget and showed no search/tool activity either.
+var errGatewayNoOutputStall = fmt.Errorf("%w: Grok Web 长时间没有返回正文", neterrorpkg.ErrUpstreamResponseEmpty)
+
+// gatewayFirstOutputBudget bounds how long a text turn may run before its
+// first assistant text. Degraded accounts keep firing searches (heartbeats
+// keep the socket alive) and only end at the total chat timeout, while the
+// HTTP response is still held for rotation, so the client sees an endless
+// "thinking" state. Healthy fast turns answer well inside these budgets;
+// expert/heavy legitimately think long and are not bounded here.
+var gatewayFirstOutputBudget = func(model string) time.Duration {
+	switch model {
+	case "fast":
+		return 45 * time.Second
+	case "auto", "build":
+		return 90 * time.Second
+	default:
+		return 0
+	}
+}
+
 // errGatewayDegraded marks the account-level grok.com degradation where a
 // turn fires a burst of web searches, then ends with response.persisted and
 // no assistant text at all (the browser shows "执行了 N 次搜索 / 正在思考"
@@ -288,9 +309,18 @@ func gatewayHandshakeResponse(response *fhttp.Response, endpoint string) *http.R
 
 func runGatewayStream(ctx context.Context, connection *websocket.Conn, writer io.Writer, model, prompt string, attachments []string, previous *inferencedomain.WebResponseState, failOnEmpty bool) error {
 	connection.SetReadLimit(gatewayMaxFrameBytes)
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = connection.SetReadDeadline(deadline)
+	totalDeadline, hasTotalDeadline := ctx.Deadline()
+	if hasTotalDeadline {
+		_ = connection.SetReadDeadline(totalDeadline)
 	}
+	var firstOutputDeadline time.Time
+	if budget := gatewayFirstOutputBudget(model); failOnEmpty && budget > 0 {
+		firstOutputDeadline = time.Now().Add(budget)
+		if !hasTotalDeadline || firstOutputDeadline.Before(totalDeadline) {
+			_ = connection.SetReadDeadline(firstOutputDeadline)
+		}
+	}
+	sawActivity := false
 	sender := &gatewaySender{connection: connection}
 	initialEventID := "evt_init_" + newRequestUUID()
 	initial := map[string]any{
@@ -333,6 +363,12 @@ func runGatewayStream(ctx context.Context, connection *websocket.Conn, writer io
 				// response.done never came within the grace window.
 				return nil
 			}
+			if !sawOutput && !firstOutputDeadline.IsZero() && ctx.Err() == nil && !time.Now().Before(firstOutputDeadline) {
+				if sawActivity {
+					return errGatewayDegraded
+				}
+				return errGatewayNoOutputStall
+			}
 			return fmt.Errorf("读取 Grok Gateway: %w", err)
 		}
 		if messageType != websocket.TextMessage {
@@ -369,7 +405,17 @@ func runGatewayStream(ctx context.Context, connection *websocket.Conn, writer io
 			}
 		}
 		if gatewayEnvelopeHasOutput(&envelope) {
+			if !sawOutput && !firstOutputDeadline.IsZero() && !persisted {
+				// First answer text: lift the first-output budget.
+				if hasTotalDeadline {
+					_ = connection.SetReadDeadline(totalDeadline)
+				} else {
+					_ = connection.SetReadDeadline(time.Time{})
+				}
+			}
 			sawOutput = true
+		} else if turnSent && strings.HasPrefix(envelope.Event.Type, "response.") && envelope.Event.Type != "response.created" {
+			sawActivity = true
 		}
 		if failOnEmpty && !sawOutput {
 			switch envelope.Event.Type {
