@@ -159,6 +159,111 @@ type parsedChat struct {
 	Tools                  []any
 	ToolChoice             any
 	ParallelTools          bool
+	// bufferResponsePhases moves a turn's interim assistant narration (the text
+	// grok.com's Build/Auto/Expert/Heavy modes emit on CHANNEL_ASSISTANT_RESPONSE
+	// between search/tool phases, before the final answer) into the reasoning
+	// channel, so third-party clients (Kelivo, Cherry Studio) render it as a
+	// collapsible thinking trace instead of prepending it to the answer. The
+	// final response phase is still delivered as answer content.
+	bufferResponsePhases bool
+	respPhaseBuf         strings.Builder
+	respPhaseLive        bool
+	pendingEmits         []pendingEmit
+}
+
+type pendingEmit struct {
+	kind  string
+	delta string
+}
+
+func (p *parsedChat) queueEmit(kind, delta string) {
+	if p == nil || delta == "" {
+		return
+	}
+	p.pendingEmits = append(p.pendingEmits, pendingEmit{kind: kind, delta: delta})
+}
+
+func (p *parsedChat) takeEmits() []pendingEmit {
+	if p == nil || len(p.pendingEmits) == 0 {
+		return nil
+	}
+	out := p.pendingEmits
+	p.pendingEmits = nil
+	return out
+}
+
+// flushRespPhaseAsReasoning commits a just-ended interim response phase to the
+// reasoning stream. Called when a new phase marker proves the buffered response
+// text was narration rather than the final answer.
+func (p *parsedChat) flushRespPhaseAsReasoning() {
+	if p == nil {
+		return
+	}
+	p.respPhaseLive = false
+	if p.respPhaseBuf.Len() == 0 {
+		return
+	}
+	text := strings.TrimSpace(p.respPhaseBuf.String())
+	p.respPhaseBuf.Reset()
+	if text == "" {
+		return
+	}
+	text = reasoningParagraph(p, text)
+	p.Reasoning.WriteString(text)
+	p.queueEmit("reasoning", text)
+}
+
+// respPhaseCommitThreshold: an interim narration line is one short sentence
+// ("我去查一下今天的新闻。"). Once a response phase grows past this, or starts a
+// second paragraph, it is treated as the answer and streamed live instead of
+// being held until completion.
+const respPhaseCommitThreshold = 160
+
+// bufferRespPhase holds response-phase text until we know whether it is
+// narration or the answer. It returns the text to emit now (possibly empty).
+func (p *parsedChat) bufferRespPhase(delta string) (string, string) {
+	if p.respPhaseLive {
+		p.upstreamText.WriteString(delta)
+		cleaned := cleanChatToken(p, delta)
+		p.appendText(cleaned)
+		return "text", cleaned
+	}
+	p.respPhaseBuf.WriteString(delta)
+	buffered := p.respPhaseBuf.String()
+	if utf8.RuneCountInString(buffered) >= respPhaseCommitThreshold || strings.Contains(strings.TrimLeft(buffered, "\n "), "\n\n") {
+		p.respPhaseLive = true
+		p.flushRespPhaseAsText()
+	}
+	return "", ""
+}
+
+// reasoningParagraph separates consecutive reasoning entries with a blank line
+// so clients render each step on its own line.
+func reasoningParagraph(p *parsedChat, text string) string {
+	if p.Reasoning.Len() > 0 && !strings.HasSuffix(p.Reasoning.String(), "\n") {
+		return "\n\n" + text
+	}
+	return text
+}
+
+// flushRespPhaseAsText commits the final response phase (the one still open when
+// the turn completes) to the answer content.
+func (p *parsedChat) flushRespPhaseAsText() {
+	if p == nil {
+		return
+	}
+	// Once any response-phase text reaches the answer, the phase is committed:
+	// later deltas and citations in it stream straight through in order.
+	p.respPhaseLive = true
+	if p.respPhaseBuf.Len() == 0 {
+		return
+	}
+	text := p.respPhaseBuf.String()
+	p.respPhaseBuf.Reset()
+	p.upstreamText.WriteString(text)
+	cleaned := cleanChatToken(p, text)
+	p.appendText(cleaned)
+	p.queueEmit("text", cleaned)
 }
 
 func (p *parsedChat) textCharacterLen() int {
@@ -934,9 +1039,23 @@ func consumeUpstreamWithCitations(source io.Reader, emit func(string, string) er
 }
 
 func consumeUpstreamInto(source io.Reader, parsed *parsedChat, emit func(string, string) error) error {
-	return consumeJSONObjects(source, 8<<20, func(data []byte) error {
+	drain := func() error {
+		for _, queued := range parsed.takeEmits() {
+			if emit == nil {
+				continue
+			}
+			if err := emit(queued.kind, queued.delta); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	err := consumeJSONObjects(source, 8<<20, func(data []byte) error {
 		kind, delta, err := parseUpstreamFrame(data, parsed)
 		if err != nil {
+			return err
+		}
+		if err := drain(); err != nil {
 			return err
 		}
 		if emit == nil {
@@ -946,6 +1065,13 @@ func consumeUpstreamInto(source io.Reader, parsed *parsedChat, emit func(string,
 		// even when the frame produced no visible text delta.
 		return emit(kind, delta)
 	})
+	if err != nil {
+		return err
+	}
+	// A stream that ended without response.done (persisted grace) still owes
+	// the buffered final phase to the answer.
+	parsed.flushRespPhaseAsText()
+	return drain()
 }
 
 func consumeJSONObjects(source io.Reader, maxObjectBytes int, consume func([]byte) error) error {
