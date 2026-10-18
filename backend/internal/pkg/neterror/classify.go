@@ -20,6 +20,27 @@ var ErrUpstreamStreamIdleTimeout = errors.New("upstream stream idle timeout")
 // policy without penalizing ordinary request aborts.
 var ErrUpstreamResponseEmpty = errors.New("upstream response body is empty")
 
+// ErrUpstreamSearchDegraded marks an account-level degradation where the
+// upstream fires web/X searches and then ends the turn without any answer
+// text. It always travels together with ErrUpstreamResponseEmpty (see
+// SearchDegradedError) so existing empty-response handling still applies,
+// while callers that care can escalate the account cooldown on repeats.
+var ErrUpstreamSearchDegraded = errors.New("upstream search-only degraded turn")
+
+// SearchDegradedError wraps both the empty-response and search-degraded
+// sentinels.
+type SearchDegradedError struct{ Message string }
+
+func (e *SearchDegradedError) Error() string { return e.Message }
+func (e *SearchDegradedError) Unwrap() []error {
+	return []error{ErrUpstreamResponseEmpty, ErrUpstreamSearchDegraded}
+}
+
+// IsUpstreamSearchDegraded reports a search-only degraded turn.
+func IsUpstreamSearchDegraded(err error) bool {
+	return errors.Is(err, ErrUpstreamSearchDegraded)
+}
+
 // ErrUpstreamOutputLoop is raised when the gateway terminates a stream because
 // the model repeated the same visible or reasoning delta past the doom-loop
 // guard. It is distinct from a transport cut (upstream_stream_interrupted).
