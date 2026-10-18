@@ -1322,7 +1322,17 @@ attemptLoop:
 				break
 			}
 			responseFailure := false
-			if status, retryAfter, classified := upstreamResponseErrorHealthPenalty(err, holdCfg.IdleAccountCooldown); classified {
+			if neterrorpkg.IsUpstreamSearchDegraded(err) {
+				responseFailure = true
+				writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
+				cooldown, strikes, rate, markErr := s.selector.MarkSearchDegraded(writeCtx, credential, http.StatusBadGateway)
+				writeCancel()
+				if markErr != nil {
+					s.logger.Warn("search_degraded_cooldown_failed", "request_id", input.RequestID, "account_id", credential.ID, "error", markErr)
+				} else {
+					s.logger.Warn("search_degraded_cooldown", "request_id", input.RequestID, "account_id", credential.ID, "strike", strikes, "cooldown", cooldown.String(), "recent_success_rate", rate)
+				}
+			} else if status, retryAfter, classified := upstreamResponseErrorHealthPenalty(err, holdCfg.IdleAccountCooldown); classified {
 				responseFailure = true
 				writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
 				markErr := s.selector.MarkFailureAfterSuccess(writeCtx, credential, status, retryAfter)
