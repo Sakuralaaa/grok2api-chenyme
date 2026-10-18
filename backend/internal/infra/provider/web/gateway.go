@@ -44,7 +44,7 @@ const (
 // forever). It wraps ErrUpstreamResponseEmpty so the gateway service treats
 // it as an empty upstream response: the account gets the idle cooldown and
 // the request rotates to another account before any byte reaches the client.
-var errGatewayDegraded = fmt.Errorf("%w: Grok Web 账号降级（只返回搜索工具帧、没有正文）", neterrorpkg.ErrUpstreamResponseEmpty)
+var errGatewayDegraded error = &neterrorpkg.SearchDegradedError{Message: neterrorpkg.ErrUpstreamResponseEmpty.Error() + ": Grok Web 账号降级（只返回搜索工具帧、没有正文）"}
 
 // errGatewayEmptyDone marks response.done without any assistant output.
 var errGatewayEmptyDone = fmt.Errorf("%w: Grok Web 响应完成但没有正文", neterrorpkg.ErrUpstreamResponseEmpty)
