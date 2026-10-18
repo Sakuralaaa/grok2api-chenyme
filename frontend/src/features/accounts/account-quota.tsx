@@ -101,7 +101,7 @@ function BuildQuota({ quota, billing, locale }: { quota: QuotaDTO; billing?: Bil
   );
 }
 
-const visibleWebQuotaModes = ["auto", "fast", "expert", "heavy"] as const;
+const visibleWebQuotaModes = ["auto", "fast", "expert", "heavy", "build"] as const;
 
 const imagineQuotaModes = [
   { mode: "image_pro", labelKey: "imagineModeImagePro" as const },
@@ -147,9 +147,18 @@ export function WebQuota({ windows, locale, tier }: { windows: NonNullable<Accou
   const mainBlock = (() => {
     if (weekly) return <WeeklyWebQuota window={weekly} locale={locale} t={t} />;
     const fast = windowsByMode.get("fast");
+    const build = windowsByMode.get("build");
+    if (tier === "basic" && fast && build) {
+      return (
+        <div className="grid w-full min-w-0 grid-cols-[2fr_1fr] divide-x divide-border/70">
+          <WebQuotaMode mode="Fast" window={fast} locale={locale} compact />
+          <WebQuotaMode mode="Build" window={build} locale={locale} compact recoveryProbe={build.remaining === 0} />
+        </div>
+      );
+    }
     if (tier === "basic" && fast) return <WebQuotaMode mode="Fast" window={fast} locale={locale} />;
     return (
-      <div className="grid w-full min-w-0 grid-cols-4 divide-x divide-border/70">
+      <div className="grid w-full min-w-0 grid-cols-5 divide-x divide-border/70">
         {visibleWebQuotaModes.map((mode) => {
           const window = windowsByMode.get(mode);
           if (!window) {
