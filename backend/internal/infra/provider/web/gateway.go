@@ -57,6 +57,10 @@ type gatewayEnvelope struct {
 		Conversation  struct {
 			ID string `json:"id"`
 		} `json:"conversation"`
+		ResponseID string `json:"response_id"`
+		Response   struct {
+			ID string `json:"id"`
+		} `json:"response"`
 		Delta string          `json:"delta"`
 		Text  json.RawMessage `json:"text"`
 		Chunk struct {
@@ -311,6 +315,16 @@ func runGatewayStream(ctx context.Context, connection *websocket.Conn, writer io
 	turnSent := false
 	sawOutput := false
 	persisted := false
+	// On a continuation (load_existing) Gateway first replays the previous
+	// turn after conversation.attached: its chunks and its response.done,
+	// tagged with the parent response id. Verified live: forwarding them
+	// returned the previous answer as the new one. Skip every frame until
+	// the new turn's response.created arrives.
+	awaitingNewResponse := previous != nil
+	previousResponseID := ""
+	if previous != nil {
+		previousResponseID = previous.UpstreamParentResponseID
+	}
 	for {
 		messageType, data, err := connection.ReadMessage()
 		if err != nil {
@@ -330,6 +344,29 @@ func runGatewayStream(ctx context.Context, connection *websocket.Conn, writer io
 		var envelope gatewayEnvelope
 		if err := json.Unmarshal(data, &envelope); err != nil {
 			continue
+		}
+		if awaitingNewResponse {
+			switch envelope.Event.Type {
+			case "response.created":
+				if envelope.Event.Response.ID != "" && envelope.Event.Response.ID != previousResponseID {
+					awaitingNewResponse = false
+				}
+			case "session.created", "conversation.attached", "error", "session.ended":
+				// Session control and failures still need handling below.
+			default:
+				if gatewayReplayFrame(&envelope, previousResponseID) {
+					continue
+				}
+				if id := firstNonEmpty(envelope.Event.ResponseID, envelope.Event.Response.ID); id != "" {
+					// A frame of a different, non-parent response: the new turn
+					// started even though response.created was not seen.
+					awaitingNewResponse = false
+				} else if strings.HasPrefix(envelope.Event.Type, "response.") {
+					// Untagged response frames before the new turn are the
+					// user-message echo, not assistant output.
+					continue
+				}
+			}
 		}
 		if gatewayEnvelopeHasOutput(&envelope) {
 			sawOutput = true
@@ -379,6 +416,14 @@ func runGatewayStream(ctx context.Context, connection *websocket.Conn, writer io
 			}
 		}
 	}
+}
+
+// gatewayReplayFrame reports a frame that belongs to the replayed parent turn.
+func gatewayReplayFrame(envelope *gatewayEnvelope, previousResponseID string) bool {
+	if previousResponseID == "" {
+		return false
+	}
+	return envelope.Event.ResponseID == previousResponseID || envelope.Event.Response.ID == previousResponseID
 }
 
 func gatewayHeartbeat(sender *gatewaySender, done <-chan struct{}) {
@@ -553,6 +598,9 @@ func collectGatewayToolUsageCard(parsed *parsedChat, card map[string]any) {
 		args, _ := browse["args"].(map[string]any)
 		if target := firstString(args, "url"); target != "" {
 			queueToolReasoning(parsed, "🌐 浏览："+target)
+			if len(parsed.browsedURLs) < maxTrackedCitationSources {
+				parsed.browsedURLs = append(parsed.browsedURLs, target)
+			}
 		}
 		recordGatewaySearchTool(parsed, id, "")
 		return
