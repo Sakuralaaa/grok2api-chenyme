@@ -37,6 +37,8 @@ type DataTableOptionFilter = {
   options: DataTableFilterOption[];
   onChange: (value: string) => void;
   selectedLabel?: string;
+  // Long option lists scroll inside the submenu instead of stretching it.
+  scrollable?: boolean;
 };
 
 type DataTableTextFilter = {
@@ -112,7 +114,7 @@ export function DataTableFilters({ filters }: { filters: DataTableFilter[] }) {
                 <span>{filter.label}</span>
                 {selectedLabel ? <span className="max-w-20 truncate text-xs text-muted-foreground">{selectedLabel}</span> : null}
               </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent className="w-52">
+              <DropdownMenuSubContent className={filter.scrollable ? "max-h-[min(22rem,calc(100vh-2rem))] w-60 overflow-y-auto" : "w-52"}>
                 <DropdownMenuRadioGroup value={filter.value || "__all"} onValueChange={(value) => filter.onChange(value === "__all" ? "" : value)}>
                   <DropdownMenuRadioItem value="__all">{t("common.all")}</DropdownMenuRadioItem>
                   {filter.options.map((option) => {
