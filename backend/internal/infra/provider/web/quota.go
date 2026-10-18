@@ -36,6 +36,13 @@ func (a *Adapter) SyncQuota(ctx context.Context, credential account.Credential) 
 	if fastErr == nil {
 		chatWindows = append(chatWindows, fastWindow)
 	}
+	// Build (composer "Build" mode) has its own /rest/rate-limits window
+	// (Basic: 10 per 2h). It is optional: an account or region without Build
+	// must not fail the whole refresh, it just shows no Build window.
+	buildWindow, buildErr := a.SyncQuotaMode(ctx, credential, "build")
+	if errors.Is(buildErr, provider.ErrUnauthorized) {
+		return provider.QuotaSnapshot{}, buildErr
+	}
 	imagineSnapshot, imagineErr := a.SyncQuotaGroup(ctx, credential, account.QuotaGroupWebImagine)
 	if imagineErr != nil {
 		// A full refresh replaces every stored window. Never return a partial
@@ -57,12 +64,18 @@ func (a *Adapter) SyncQuota(ctx context.Context, credential account.Credential) 
 				return provider.QuotaSnapshot{}, weeklyErr
 			}
 			// 周池覆盖 chat 模式窗口，但保留 imagine 窗口供前端展示与触顶判定。
-			kept := make([]account.QuotaWindow, 0, 1+len(imagineSnapshot.Windows))
+			kept := make([]account.QuotaWindow, 0, 2+len(imagineSnapshot.Windows))
 			kept = append(kept, weekly)
+			if buildErr == nil {
+				kept = append(kept, buildWindow)
+			}
 			kept = append(kept, imagineSnapshot.Windows...)
 			windows = kept
 		}
 		if windows == nil {
+			if buildErr == nil {
+				chatWindows = append(chatWindows, buildWindow)
+			}
 			windows = append(chatWindows, imagineSnapshot.Windows...)
 		}
 		return provider.QuotaSnapshot{Tier: tier, Windows: windows, SyncedAt: time.Now().UTC()}, nil
