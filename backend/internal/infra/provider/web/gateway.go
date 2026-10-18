@@ -402,15 +402,21 @@ func gatewaySession(model string, previous *inferencedomain.WebResponseState) ma
 		// Mirrors the current grok.com browser session.create. The browser also
 		// sends client_side_toolsets (connectors-v3, location); those are tools
 		// the client must execute, which this proxy cannot answer, so they are
-		// deliberately omitted. keep_context/is_temporary/disable_memory are not
-		// sent by the browser any more; with them a fast turn was observed to
-		// end immediately with an empty response.done on healthy accounts.
+		// deliberately omitted. API traffic is always private: memory and
+		// personalization are off, so one caller's prompts never leak into
+		// another caller sharing the same account. Verified live: fast and
+		// build answer normally with these flags.
 		"protocol_capabilities":     []string{"conversation_attached", "custom_methods_v1", "workspace_servers_v1"},
 		"use_chunk":                 true,
 		"accept_interleaved_phases": true,
 		"enable_side_by_side":       true, "force_side_by_side": false,
 		"enable_image_generation": true, "image_generation_count": 2,
 		"disable_text_follow_ups": false, "disable_artifact": true, "force_concise": false,
+		"disable_memory": true, "disable_personalization": true,
+	}
+	if previous == nil {
+		// New API conversations stay out of the account's chat history.
+		xGrok["is_temporary"] = true
 	}
 	if previous != nil {
 		xGrok["conversation_id"] = previous.ConversationID
@@ -456,6 +462,7 @@ func gatewayTurnEvent(sessionID, prompt string, attachments []string, previous *
 
 func parseGatewayEvent(event map[string]any, parsed *parsedChat) (string, string, error) {
 	typeName, _ := event["type"].(string)
+	parsed.bufferResponsePhases = true
 	switch typeName {
 	case "conversation.attached":
 		conversation, _ := event["conversation"].(map[string]any)
@@ -474,7 +481,18 @@ func parseGatewayEvent(event map[string]any, parsed *parsedChat) (string, string
 			collectGatewayToolResult(parsed, result)
 		}
 		if cite, _ := chunk["render_citation"].(map[string]any); cite != nil {
+			// Citations only appear in the final answer; commit any buffered
+			// response text first so the citation lands at the right offset.
+			parsed.flushRespPhaseAsText()
 			return applyGatewayRenderCitation(parsed, cite)
+		}
+		// A new phase marker means the model switched between thinking and
+		// responding. When it starts a fresh phase after a buffered response
+		// phase, that buffered text was interim narration, not the answer.
+		if marker, _ := chunk["phase_marker"].(map[string]any); marker != nil {
+			if kind, _ := marker["kind"].(string); kind == "KIND_THINKING_START" || kind == "KIND_RESPONSE_START" {
+				parsed.flushRespPhaseAsReasoning()
+			}
 		}
 		text, _ := chunk["text"].(map[string]any)
 		delta, _ := text["text"].(string)
@@ -485,7 +503,7 @@ func parseGatewayEvent(event map[string]any, parsed *parsedChat) (string, string
 		return appendGatewayDelta(parsed, "CHANNEL_ASSISTANT_RESPONSE", delta)
 	case "response.output_text.done":
 		text, _ := event["text"].(string)
-		if parsed.upstreamText.Len() == 0 && text != "" {
+		if parsed.upstreamText.Len() == 0 && parsed.respPhaseBuf.Len() == 0 && text != "" {
 			return appendGatewayDelta(parsed, "CHANNEL_ASSISTANT_RESPONSE", text)
 		}
 	case "response.done":
@@ -495,6 +513,8 @@ func parseGatewayEvent(event map[string]any, parsed *parsedChat) (string, string
 		if status != "" && status != "completed" {
 			return "", "", fmt.Errorf("Grok Gateway response 状态为 %s", status)
 		}
+		// The response phase still open at completion is the final answer.
+		parsed.flushRespPhaseAsText()
 	case "response.search.result":
 		result, _ := event["result"].(map[string]any)
 		if rawURL, _ := result["url"].(string); rawURL != "" {
@@ -522,23 +542,48 @@ func collectGatewayToolUsageCard(parsed *parsedChat, card map[string]any) {
 	if parsed == nil || card == nil {
 		return
 	}
+	// A tool call after response text means that text was interim narration;
+	// commit it to reasoning first so the thinking trace stays in order.
+	parsed.flushRespPhaseAsReasoning()
 	id := firstString(card, "tool_usage_card_id", "id")
 	if id == "" {
 		id = fmt.Sprintf("card:%d", parsed.ServerTools+1)
 	}
+	if browse, _ := card["browse_page"].(map[string]any); browse != nil {
+		args, _ := browse["args"].(map[string]any)
+		if target := firstString(args, "url"); target != "" {
+			queueToolReasoning(parsed, "🌐 浏览："+target)
+		}
+		recordGatewaySearchTool(parsed, id, "")
+		return
+	}
 	if web, _ := card["web_search"].(map[string]any); web != nil {
 		recordGatewaySearchTool(parsed, id, "web_search")
 		query := nestedSearchQuery(web)
+		queueToolReasoning(parsed, "🔍 网页搜索："+query)
 		upsertHostedSearchCall(parsed, id, "web_search", query, "in_progress")
 		return
 	}
 	if xSearch, _ := card["x_search"].(map[string]any); xSearch != nil {
 		recordGatewaySearchTool(parsed, id, "x_search")
 		query := nestedSearchQuery(xSearch)
+		queueToolReasoning(parsed, "𝕏 X 搜索："+query)
 		upsertHostedSearchCall(parsed, id, "x_search", query, "in_progress")
 		return
 	}
 	recordGatewaySearchTool(parsed, id, "")
+}
+
+// queueToolReasoning records a hosted tool step (search / browse) in the
+// reasoning trace so thinking-aware clients show what the model looked up.
+func queueToolReasoning(parsed *parsedChat, line string) {
+	line = strings.TrimSpace(line)
+	if parsed == nil || strings.HasSuffix(line, "：") {
+		return
+	}
+	line = reasoningParagraph(parsed, line)
+	parsed.Reasoning.WriteString(line)
+	parsed.queueEmit("reasoning", line)
 }
 
 func recordGatewaySearchTool(parsed *parsedChat, id, kind string) {
@@ -718,8 +763,23 @@ func appendGatewayDelta(parsed *parsedChat, channel, delta string) (string, stri
 		parsed.Reasoning.WriteString(delta)
 		return "reasoning", delta, nil
 	}
+	// Notetaker headers are the short step titles grok.com shows in its
+	// thinking panel ("查询东京今日天气情况"). Surface them as reasoning steps.
+	if normalized == "CHANNEL_ASSISTANT_NOTETAKER_HEADER" {
+		header := strings.TrimSpace(delta)
+		if header == "" || header == "Thinking about your request" {
+			return "", "", nil
+		}
+		header = reasoningParagraph(parsed, "**"+header+"**")
+		parsed.Reasoning.WriteString(header)
+		return "reasoning", header, nil
+	}
 	if normalized != "" && normalized != "CHANNEL_ASSISTANT_RESPONSE" {
 		return "", "", nil
+	}
+	if parsed.bufferResponsePhases {
+		kind, text := parsed.bufferRespPhase(delta)
+		return kind, text, nil
 	}
 	parsed.upstreamText.WriteString(delta)
 	cleaned := cleanChatToken(parsed, delta)
