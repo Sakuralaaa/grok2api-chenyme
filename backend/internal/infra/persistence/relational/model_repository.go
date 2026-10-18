@@ -55,8 +55,21 @@ const modelConsoleStaticSupportAvailabilityExpression = `(route.provider = 'grok
 // their confirmed quota products. Older capability snapshots may predate that
 // support, so catalog routes (and their aliases) remain discoverable while the
 // runtime selector enforces the adapter's parameter-specific tier order.
+// webBasicStaticModels lists every Web catalog model whose MinimumTier is
+// Basic. Web capability is derived from the static catalog plus tier (the
+// selector enforces tier at routing time), so a historical per-account
+// capability snapshot must never hide a newly shipped Basic catalog model such
+// as grok-chat-build from /v1/models. Kept in sync with the catalog by
+// TestWebBasicStaticModelsMatchCatalog.
+var webBasicStaticModels = []string{
+	"grok-chat-fast", "grok-chat-auto", "grok-chat-build", "grok-imagine-image",
+	"grok-imagine-image-quality", "grok-imagine-image-2.0", "imagine-image-edit", "grok-imagine-video",
+}
+
+const webBasicStaticModelsSQL = `'grok-chat-fast', 'grok-chat-auto', 'grok-chat-build', 'grok-imagine-image', 'grok-imagine-image-quality', 'grok-imagine-image-2.0', 'imagine-image-edit', 'grok-imagine-video'`
+
 const modelWebBasicMediaStaticSupportExpression = `(model_routes.provider = 'grok_web'
-	AND model_routes.upstream_model IN ('grok-imagine-image-quality', 'grok-imagine-image-2.0', 'imagine-image-edit', 'grok-imagine-video')
+	AND model_routes.upstream_model IN (` + webBasicStaticModelsSQL + `)
 	AND (
 		model_routes.origin = 'catalog'
 		OR EXISTS (
@@ -69,7 +82,7 @@ const modelWebBasicMediaStaticSupportExpression = `(model_routes.provider = 'gro
 	))`
 
 const modelWebBasicMediaStaticSupportAvailabilityExpression = `(route.provider = 'grok_web'
-	AND route.upstream_model IN ('grok-imagine-image-quality', 'grok-imagine-image-2.0', 'imagine-image-edit', 'grok-imagine-video')
+	AND route.upstream_model IN (` + webBasicStaticModelsSQL + `)
 	AND (
 		route.origin = 'catalog'
 		OR EXISTS (
