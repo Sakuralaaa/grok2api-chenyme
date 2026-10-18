@@ -347,7 +347,8 @@ func TestInferWebTierFromUpstreamQuota(t *testing.T) {
 		{name: "legacy basic", windows: []account.QuotaWindow{{Mode: "auto", Total: 20}}, want: account.WebTierBasic, known: true},
 		{name: "super", windows: []account.QuotaWindow{{Mode: "auto", Total: 50}, {Mode: "fast", Total: 140}}, want: account.WebTierSuper, known: true},
 		{name: "heavy", windows: []account.QuotaWindow{{Mode: "auto", Total: 150}, {Mode: "fast", Total: 400}}, want: account.WebTierHeavy, known: true},
-		{name: "heavy mode", windows: []account.QuotaWindow{{Mode: "heavy", Total: 20}}, want: account.WebTierHeavy, known: true},
+		// Basic accounts also report heavy 20/7200s upstream; heavy windows carry no tier signal.
+		{name: "heavy mode is not a tier signal", windows: []account.QuotaWindow{{Mode: "heavy", Total: 20}}, want: account.WebTierAuto, known: false},
 		{name: "conflicting signal uses lower tier", windows: []account.QuotaWindow{{Mode: "auto", Total: 50}, {Mode: "fast", Total: 30}}, want: account.WebTierBasic, known: true},
 		{name: "unknown", windows: []account.QuotaWindow{{Mode: "auto", Total: 9}, {Mode: "fast", Total: 31}}, want: account.WebTierAuto, known: false},
 	}
@@ -568,7 +569,8 @@ func TestDecodeImagineQuotaSnapshotAcceptsExplicitUnavailableProduct(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(windows) != 1 || windows[0].Mode != account.QuotaModeWebImageEdit || windows[0].Remaining != 0 || windows[0].ResetAt == nil {
+	// No upstream window length or nextAvailableAt: do not invent a reset time.
+	if len(windows) != 1 || windows[0].Mode != account.QuotaModeWebImageEdit || windows[0].Remaining != 0 || windows[0].ResetAt != nil || windows[0].WindowSeconds != 0 {
 		t.Fatalf("windows = %#v", windows)
 	}
 }
@@ -611,5 +613,54 @@ func TestDecodeImagineQuotaSnapshotRequiresWindowForAvailabilityOnlyProduct(t *t
 	}`), 42, now)
 	if err == nil || !strings.Contains(err.Error(), "imagePro") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestParseRateLimitsResponseUsesUpstreamValues(t *testing.T) {
+	now := time.Date(2026, 10, 18, 2, 0, 0, 0, time.UTC)
+	w, err := parseRateLimitsResponse([]byte(`{"windowSizeSeconds":7200,"remainingQueries":10,"totalQueries":10,"lowEffortRateLimits":null}`), 1, "build", now)
+	if err != nil || w.Total != 10 || w.Remaining != 10 || w.WindowSeconds != 7200 || !w.ResetAt.Equal(now.Add(2*time.Hour)) {
+		t.Fatalf("window = %#v err = %v", w, err)
+	}
+	// Exhausted: waitTimeSeconds is the real time to recovery, not the full window.
+	w, err = parseRateLimitsResponse([]byte(`{"windowSizeSeconds":86400,"remainingQueries":0,"totalQueries":30,"waitTimeSeconds":1800}`), 1, "fast", now)
+	if err != nil || w.Remaining != 0 || w.WindowSeconds != 86400 || !w.ResetAt.Equal(now.Add(30*time.Minute)) {
+		t.Fatalf("window = %#v err = %v", w, err)
+	}
+	// Token-metered modes.
+	w, err = parseRateLimitsResponse([]byte(`{"windowSizeSeconds":3600,"remainingTokens":5000,"totalTokens":20000}`), 1, "x", now)
+	if err != nil || w.Total != 20000 || w.Remaining != 5000 {
+		t.Fatalf("window = %#v err = %v", w, err)
+	}
+	// No invented window length.
+	if _, err := parseRateLimitsResponse([]byte(`{"remainingQueries":1,"totalQueries":2}`), 1, "auto", now); err == nil {
+		t.Fatal("expected error when upstream gives no window")
+	}
+	if _, err := parseRateLimitsResponse([]byte(`{"windowSizeSeconds":60,"remainingQueries":1}`), 1, "auto", now); err == nil {
+		t.Fatal("expected error when upstream gives no total")
+	}
+}
+
+func TestWebTierFromSubscriptions(t *testing.T) {
+	tests := []struct {
+		name  string
+		body  string
+		want  account.WebTier
+		known bool
+	}{
+		{"no subscriptions is basic", `{"subscriptions":[]}`, account.WebTierBasic, true},
+		{"inactive paid is basic", `{"subscriptions":[{"tier":"SUBSCRIPTION_TIER_GROK_PRO","status":"SUBSCRIPTION_STATUS_INACTIVE"}]}`, account.WebTierBasic, true},
+		{"supergrok", `{"subscriptions":[{"tier":"SUBSCRIPTION_TIER_GROK_PRO","status":"SUBSCRIPTION_STATUS_ACTIVE"}]}`, account.WebTierSuper, true},
+		{"heavy wins over lower", `{"subscriptions":[{"tier":"SUBSCRIPTION_TIER_GROK_PRO","status":"SUBSCRIPTION_STATUS_ACTIVE"},{"tier":"SUBSCRIPTION_TIER_SUPER_GROK_PRO","status":"SUBSCRIPTION_STATUS_ACTIVE"}]}`, account.WebTierHeavy, true},
+		{"lite entitlements unknown", `{"subscriptions":[{"tier":"SUBSCRIPTION_TIER_SUPER_GROK_LITE","status":"SUBSCRIPTION_STATUS_ACTIVE"}]}`, account.WebTierAuto, false},
+		{"future tier unknown", `{"subscriptions":[{"tier":"SUBSCRIPTION_TIER_SOMETHING_NEW","status":"SUBSCRIPTION_STATUS_ACTIVE"}]}`, account.WebTierAuto, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, known, err := webTierFromSubscriptions([]byte(test.body))
+			if err != nil || got != test.want || known != test.known {
+				t.Fatalf("tier = %q known = %v err = %v, want %q/%v", got, known, err, test.want, test.known)
+			}
+		})
 	}
 }
