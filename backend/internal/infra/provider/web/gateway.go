@@ -530,7 +530,12 @@ func gatewaySession(model string, previous *inferencedomain.WebResponseState) ma
 func gatewayTurnEvent(sessionID, prompt string, attachments []string, previous *inferencedomain.WebResponseState) map[string]any {
 	chunks := make([]any, 0, len(attachments)+1)
 	for _, attachment := range attachments {
-		chunks = append(chunks, map[string]any{"mention": map[string]any{"target": map[string]any{"file_mention": map[string]any{"file_id": attachment}}}})
+		// The browser encodes InputChunk with protobuf-es toJson
+		// (useProtoFieldName): the Mention.target oneof is flattened, so the
+		// wire shape is {"mention":{"file_mention":{"file_id":...}}}. A
+		// "target" wrapper is silently ignored upstream (verified live: fast
+		// and auto answered "no image" or hallucinated with it).
+		chunks = append(chunks, map[string]any{"mention": map[string]any{"file_mention": map[string]any{"file_id": attachment}}})
 	}
 	chunks = append(chunks, map[string]any{"text": map[string]any{"text": prompt}})
 	item := map[string]any{
@@ -544,9 +549,8 @@ func gatewayTurnEvent(sessionID, prompt string, attachments []string, previous *
 		event["parent_response_id"] = previous.UpstreamParentResponseID
 	}
 	if len(attachments) > 0 {
-		ids := append([]string(nil), attachments...)
-		item["file_attachment_ids"] = ids
-		event["file_attachment_ids"] = ids
+		// Browser _sendUserTurnAsync puts file_attachment_ids on the event only.
+		event["file_attachment_ids"] = append([]string(nil), attachments...)
 	}
 	return map[string]any{"session_id": sessionID, "event": event}
 }
