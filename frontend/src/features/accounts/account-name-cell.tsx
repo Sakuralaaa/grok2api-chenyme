@@ -60,6 +60,9 @@ export function AccountNameCell({ account }: { account: AccountDTO }) {
           <TooltipContent>{account.name}</TooltipContent>
         </Tooltip>
       </div>
+      {account.email?.trim() && account.email.trim().toLocaleLowerCase() !== account.name.trim().toLocaleLowerCase() ? (
+        <span className="min-w-0 truncate text-[11px] leading-4 text-muted-foreground" title={account.email.trim()}>{account.email.trim()}</span>
+      ) : null}
       <div className="flex min-h-4 w-fit min-w-0 items-center">
         <Tooltip>
           <TooltipTrigger asChild>
