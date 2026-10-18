@@ -136,6 +136,7 @@ func (p *accountSyncPipeline) reportProgress() {
 func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/accounts", h.list)
 	router.GET("/accounts/summary", h.summary)
+	router.GET("/accounts/email-domains", h.emailDomains)
 	router.GET("/accounts/export", h.exportCredentials)
 	router.POST("/accounts/export", h.exportSelectedCredentials)
 	router.GET("/accounts/:id", h.get)
@@ -418,6 +419,7 @@ func (h *Handler) list(c *gin.Context) {
 	values, total, err := h.service.List(c.Request.Context(), page, pageSize, c.Query("search"), accountapp.ListFilter{
 		Provider: c.Query("provider"), QuotaType: c.Query("type"), Status: c.Query("status"), Egress: c.Query("egress"),
 		Renewal: c.Query("renewal"), Risk: c.Query("risk"), Agreement: c.Query("agreement"), Association: c.Query("association"),
+		EmailDomain: c.Query("emailDomain"),
 		Sort: repository.SortQuery{Field: c.Query("sortBy"), Direction: repository.SortDirection(c.Query("sortOrder"))},
 	})
 	if errors.Is(err, accountapp.ErrInvalidFilter) {
@@ -433,6 +435,23 @@ func (h *Handler) list(c *gin.Context) {
 		items = append(items, newAccountResponse(value))
 	}
 	response.Success(c, http.StatusOK, gin.H{"items": items, "page": page, "pageSize": pageSize, "total": total})
+}
+
+func (h *Handler) emailDomains(c *gin.Context) {
+	values, err := h.service.EmailDomains(c.Request.Context(), c.Query("provider"))
+	if errors.Is(err, accountapp.ErrInvalidFilter) {
+		response.Error(c, http.StatusBadRequest, "invalidFilter", err.Error())
+		return
+	}
+	if err != nil {
+		response.Error(c, http.StatusInternalServerError, "accountEmailDomainsFailed", "读取邮箱域名失败")
+		return
+	}
+	items := make([]gin.H, 0, len(values))
+	for _, value := range values {
+		items = append(items, gin.H{"domain": value.Domain, "count": value.Count})
+	}
+	response.Success(c, http.StatusOK, gin.H{"items": items})
 }
 
 func (h *Handler) summary(c *gin.Context) {
