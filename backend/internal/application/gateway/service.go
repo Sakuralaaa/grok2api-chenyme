@@ -1048,6 +1048,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	normalizedMetadata := &provider.NormalizedRequestMetadata{}
 	responseStartedAt := startedAt
 	transientRetry := 0
+	searchDegradedAttempts := 0
 	forwardResponse := func(lease *accountLease, credential accountdomain.Credential, billing *accountdomain.Billing) (*provider.Response, error) {
 		started := time.Now()
 		responseStartedAt = started
@@ -1357,6 +1358,18 @@ attemptLoop:
 			// The failed response is safe to retry on another account only when
 			// doing so cannot repeat an upstream-hosted tool side effect.
 			if responseFailure && qualityRequestHasReplayUnsafeHostedTools(input.Body) {
+				break attemptLoop
+			}
+			if credential.Provider == accountdomain.ProviderWeb && neterrorpkg.IsUpstreamResponseEmpty(err) {
+				// Search-only degraded turns and first-output stalls on Web.
+				searchDegradedAttempts++
+			}
+			if searchDegradedAttempts >= maxSearchDegradedAttempts {
+				// Every degraded account burns a long search-only turn while
+				// the client still sees nothing; stop and say why instead of
+				// walking the whole pool.
+				lastFailure = &UpstreamFailure{HTTPStatus: http.StatusServiceUnavailable, Code: "upstream_search_degraded", PublicMessage: fmt.Sprintf("Grok Web 账号降级：连续 %d 个账号只返回搜索或长时间没有正文，已停止重试，请稍后再试（可换 expert 等模式或关闭联网搜索）", searchDegradedAttempts), AccountID: credential.ID, AccountName: credential.Name, Cause: err}
+				s.logger.Warn("search_degraded_attempts_exhausted", "request_id", input.RequestID, "attempts", searchDegradedAttempts)
 				break attemptLoop
 			}
 			if shouldStopForNonAccountFingerprint(failureFingerprints, lastFailure) {
@@ -2129,6 +2142,9 @@ func shouldStopForNonAccountFingerprint(fingerprints map[string]int, failure *Up
 	}
 	return fingerprints[failure.Fingerprint] >= limit
 }
+
+// maxSearchDegradedAttempts caps search-only degraded turns per request.
+const maxSearchDegradedAttempts = 3
 
 func isRetryable(status int) bool {
 	return status == 402 || status == 403 || status == 429 || status >= 500
