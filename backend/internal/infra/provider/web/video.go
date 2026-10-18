@@ -251,8 +251,15 @@ func boundWebMediaDiagnostic(value string, limit int) string {
 }
 
 func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoRequest) (provider.VideoResult, error) {
-	if strings.TrimSpace(request.ImageURL) != "" || len(request.ReferenceURLs) > 0 {
-		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("Grok Web 当前仅支持文本生视频；图片视频请使用 Build 或 Console Provider"))
+	imageURL := strings.TrimSpace(request.ImageURL)
+	if imageURL != "" && len(request.ReferenceURLs) > 0 {
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("image 与 reference_images 不能同时使用"))
+	}
+	if len(request.ReferenceURLs) > maxWebVideoReferences {
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("reference_images 最多 %d 张", maxWebVideoReferences))
+	}
+	if strings.TrimSpace(request.VideoURL) != "" || len(request.ReferenceAudios) > 0 {
+		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("Grok Web 暂不支持视频编辑/续写或参考音频"))
 	}
 	cfg := a.config()
 	token, err := a.cipher.Decrypt(request.Credential.EncryptedAccessToken)
@@ -274,8 +281,41 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if resolution == "" {
 		resolution = "720p"
 	}
-	payload := videoCreatePayload(request.Prompt, ratio, resolution, segments[0])
-	response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
+	var payload map[string]any
+	var response *http.Response
+	if imageURL != "" || len(request.ReferenceURLs) > 0 {
+		// Image-to-video / reference-to-video: upload each picture to the
+		// Imagine asset store first (same path grok.com/imagine uses), then
+		// reference the returned asset ids from mediaGenInput.
+		sources := request.ReferenceURLs
+		if imageURL != "" {
+			sources = []string{imageURL}
+		}
+		assets := make([]string, 0, len(sources))
+		for _, rawURL := range sources {
+			image, loadErr := a.loadChatImage(ctx, lease, rawURL, cfg.MaxInputImageBytes)
+			if loadErr != nil {
+				return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, loadErr)
+			}
+			uploaded, uploadErr := a.uploadFileV2Direct(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine", imagineSelfUploadSource, "video_image_upload")
+			if uploadErr != nil {
+				return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, uploadErr)
+			}
+			if uploaded.MetadataID == "" {
+				return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStagePrepare, 0, fmt.Errorf("上传图片成功但上游未返回 fileMetadataId"))
+			}
+			assets = append(assets, uploaded.MetadataID)
+		}
+		if imageURL != "" {
+			payload = imageToVideoPayload(request.Prompt, assets[0], ratio, resolution, segments[0])
+		} else {
+			payload = referenceToVideoPayload(request.Prompt, assets, ratio, resolution, segments[0])
+		}
+		response, err = a.postJSONWithReferer(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second, cfg.BaseURL+"/imagine")
+	} else {
+		payload = videoCreatePayload(request.Prompt, ratio, resolution, segments[0])
+		response, err = a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
+	}
 	if err != nil {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
 	}
@@ -543,6 +583,69 @@ func applyFreeWebVideoDurationCap(seconds, cap int, credential account.Credentia
 // In particular, the generation parameters belong in mediaGenInput rather
 // than the legacy modelConfigOverride map. Keeping this shape explicit also
 // prevents text-to-video from depending on a synthetic media post.
+// maxWebVideoReferences mirrors the grok.com Imagine composer limit for
+// reference-to-video inputs.
+const maxWebVideoReferences = 7
+
+// videoMessage matches grok.com: the prompt (when present) followed by the
+// mode flag, e.g. "a cat dancing --mode=custom".
+func videoMessage(prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return "--mode=custom"
+	}
+	return prompt + " --mode=custom"
+}
+
+// imageToVideoPayload animates one uploaded picture (grok.com
+// buildImageToVideoInput: inputAssets holds exactly one asset id).
+func imageToVideoPayload(prompt, assetID, ratio, resolution string, seconds int) map[string]any {
+	input := map[string]any{
+		"inputAssets":    []string{assetID},
+		"duration":       seconds,
+		"resolutionName": resolution,
+		"mode":           "custom",
+	}
+	if strings.TrimSpace(prompt) != "" {
+		input["prompt"] = prompt
+	}
+	if ratio != "" {
+		input["aspectRatio"] = ratio
+	}
+	return mediaVideoPayload(prompt, map[string]any{"imageToVideo": input})
+}
+
+// referenceToVideoPayload uses pictures as style/content references
+// (grok.com buildReferenceToVideoInput).
+func referenceToVideoPayload(prompt string, assetIDs []string, ratio, resolution string, seconds int) map[string]any {
+	input := map[string]any{
+		"prompt":         prompt,
+		"inputAssets":    assetIDs,
+		"duration":       seconds,
+		"resolutionName": resolution,
+	}
+	if ratio != "" {
+		input["aspectRatio"] = ratio
+	}
+	return mediaVideoPayload(prompt, map[string]any{"referenceToVideo": input})
+}
+
+func mediaVideoPayload(prompt string, mediaGenInput map[string]any) map[string]any {
+	return map[string]any{
+		"modelName":            "imagine-video-gen",
+		"message":              videoMessage(prompt),
+		"enableImageStreaming": true,
+		"enableSideBySide":     true,
+		"sendFinalMetadata":    true,
+		"responseMetadata": map[string]any{
+			"experiments":         []any{},
+			"modelConfigOverride": map[string]any{"modelMap": map[string]any{}},
+		},
+		"mediaGenInput": mediaGenInput,
+		"kind":          "CONVERSATION_KIND_IMAGINE",
+	}
+}
+
 func videoCreatePayload(prompt, ratio, resolution string, seconds int) map[string]any {
 	return map[string]any{
 		"modelName":            "imagine-video-gen",
