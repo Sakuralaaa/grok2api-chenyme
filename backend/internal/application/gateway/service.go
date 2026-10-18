@@ -938,6 +938,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		return nil, routeErr
 	}
 	timing := newGenerationTiming(publicModel, route.Provider)
+	timing.setRequest(input.RequestID, input.Streaming)
 	timingHandedOff := false
 	defer func() {
 		if !timingHandedOff {
@@ -1050,6 +1051,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		started := time.Now()
 		responseStartedAt = started
 		lease.markSelectorUpstreamStarted()
+		timing.markAccount(credential.ID)
 		response, err := adapter.ForwardResponse(physicalCallCtx, provider.ResponseResourceRequest{Credential: credential, ForcedEgressNodeID: input.ForcedEgressNodeID, Billing: billing, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: input.PromptCacheKey, ReasoningReplayKey: reasoningReplayKey, AllowClientToolCacheRoute: input.AllowClientToolCacheRoute, GrokTurnIndex: input.GrokTurnIndex, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation), NormalizedMetadata: normalizedMetadata})
 		auditBase.ReasoningEffort = normalizedMetadata.ReasoningEffort
 		err = failureAttempts.captureResponse(credential, started, response, err)
@@ -1176,6 +1178,12 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 				if successful {
 					outcome = "success"
 				}
+				var strikes, samples int
+				var rate float64
+				if s.selector != nil {
+					strikes, rate, samples = s.selector.searchHealth.snapshot(accountID)
+				}
+				timing.setOutcomeDetail(errorCode, strikes, rate, samples)
 				timing.finish(s.logger, outcome)
 			})
 		}
