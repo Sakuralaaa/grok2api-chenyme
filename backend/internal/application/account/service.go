@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -316,6 +317,8 @@ type ListFilter struct {
 	// Association values are provider-specific: Web supports build, console, and combined filters;
 	// Build and Console support only webLinked and webUnlinked.
 	Association string
+	// EmailDomain filters by registered email domain (repository.EmailDomainNone for no email).
+	EmailDomain string
 	Sort        repository.SortQuery
 }
 
@@ -558,6 +561,7 @@ func (s *Service) List(ctx context.Context, page, pageSize int, search string, f
 		!oneOf(filter.Agreement, "", "nsfwEnabled", "nsfwDisabled", "termsAccepted", "termsNotAccepted", "allAccepted", "allNotAccepted") ||
 		(filter.Agreement != "" && filter.Provider != string(accountdomain.ProviderWeb)) ||
 		!validAssociationFilter(filter.Provider, filter.Association) ||
+		!validEmailDomainFilter(filter.EmailDomain) ||
 		!repository.IsValidSort(filter.Sort, "name", "type", "status", "createdAt") {
 		return nil, 0, ErrInvalidFilter
 	}
@@ -569,7 +573,8 @@ func (s *Service) List(ctx context.Context, page, pageSize int, search string, f
 	repositoryFilter := repository.AccountListFilter{
 		Provider: filter.Provider, QuotaType: filter.QuotaType, Status: filter.Status, Egress: egressMode,
 		EgressNodeID: egressNodeID, EgressSourceID: egressSourceID,
-		Refreshable: refreshable, Agreement: filter.Agreement, Association: filter.Association, Now: s.now(),
+		Refreshable: refreshable, Agreement: filter.Agreement, Association: filter.Association,
+		EmailDomain: strings.ToLower(strings.TrimSpace(filter.EmailDomain)), Now: s.now(),
 	}
 	if filter.Risk != "" {
 		if _, ok := s.accounts.(buildBotFlagIndexRepository); ok {
@@ -776,6 +781,33 @@ func oneOf(value string, allowed ...string) bool {
 
 // validAssociationFilter validates association filters against the selected provider.
 // Web keeps its six Build/Console/combined values; Build and Console filter only by Web links.
+var emailDomainPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
+func validEmailDomainFilter(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" || value == repository.EmailDomainNone {
+		return true
+	}
+	return len(value) <= 253 && emailDomainPattern.MatchString(value)
+}
+
+type emailDomainRepository interface {
+	ListEmailDomains(ctx context.Context, provider string) ([]repository.EmailDomainCount, error)
+}
+
+// EmailDomains lists registered email domains with account counts for the
+// admin domain filter. Repositories without the index return an empty list.
+func (s *Service) EmailDomains(ctx context.Context, providerValue string) ([]repository.EmailDomainCount, error) {
+	if providerValue != "" && !accountdomain.Provider(providerValue).IsValid() {
+		return nil, ErrInvalidFilter
+	}
+	indexed, ok := s.accounts.(emailDomainRepository)
+	if !ok {
+		return []repository.EmailDomainCount{}, nil
+	}
+	return indexed.ListEmailDomains(ctx, providerValue)
+}
+
 func validAssociationFilter(providerValue, association string) bool {
 	if association == "" {
 		return true
