@@ -43,6 +43,9 @@ func (a *Adapter) SyncQuota(ctx context.Context, credential account.Credential) 
 	if errors.Is(buildErr, provider.ErrUnauthorized) {
 		return provider.QuotaSnapshot{}, buildErr
 	}
+	if buildErr != nil {
+		a.log().Warn("web_build_quota_sync_failed", "account_id", credential.ID, "error", buildErr.Error())
+	}
 	imagineSnapshot, imagineErr := a.SyncQuotaGroup(ctx, credential, account.QuotaGroupWebImagine)
 	if imagineErr != nil {
 		// A full refresh replaces every stored window. Never return a partial
@@ -53,6 +56,9 @@ func (a *Adapter) SyncQuota(ctx context.Context, credential account.Credential) 
 	// 套餐等级以上游 /rest/subscriptions 为准；接口失败或套餐权益未知时才退回
 	// 额度形态推断，避免上游调整额度数字后把付费号误判成 Basic（或反之）。
 	planTier, planKnown, planErr := a.syncSubscriptionTier(ctx, credential)
+	if planErr != nil {
+		a.log().Warn("web_subscription_tier_sync_failed", "account_id", credential.ID, "error", planErr.Error())
+	}
 	if planErr != nil && errors.Is(planErr, provider.ErrUnauthorized) && autoErr == nil {
 		// rate-limits 刚以同一凭据成功，订阅接口的 401 不足以判定账号失效。
 		planKnown = false
