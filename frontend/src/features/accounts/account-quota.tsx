@@ -137,7 +137,7 @@ export function ConsoleQuota({ windows, locale }: { windows: NonNullable<Account
   );
 }
 
-export function WebQuota({ windows, locale, tier }: { windows: NonNullable<AccountDTO["quotaWindows"]>; locale: string; tier?: AccountDTO["webTier"] }) {
+export function WebQuota({ windows, locale }: { windows: NonNullable<AccountDTO["quotaWindows"]>; locale: string; tier?: AccountDTO["webTier"] }) {
   const { t } = useTranslation();
   if (windows.length === 0) return <span className="text-xs text-muted-foreground">{t("accounts.quotaNotSynced")}</span>;
   const windowsByMode = new Map(windows.map((window) => [window.mode, window]));
@@ -146,25 +146,20 @@ export function WebQuota({ windows, locale, tier }: { windows: NonNullable<Accou
 
   const mainBlock = (() => {
     if (weekly) return <WeeklyWebQuota window={weekly} locale={locale} t={t} />;
-    const fast = windowsByMode.get("fast");
-    const build = windowsByMode.get("build");
-    if (tier === "basic" && fast && build) {
-      return (
-        <div className="grid w-full min-w-0 grid-cols-[2fr_1fr] divide-x divide-border/70">
-          <WebQuotaMode mode="Fast" window={fast} locale={locale} compact />
-          <WebQuotaMode mode="Build" window={build} locale={locale} compact recoveryProbe={build.remaining === 0} />
-        </div>
-      );
+    // 只展示上游真实同步回来的模式窗口，不按套餐等级硬编码列。
+    // 注意：Basic 账号的上游也会回报 expert/heavy 的默认数值，但并不可用；后端只同步
+    // 账号可路由的模式（auto/fast/build，付费号另有 weekly），这里有什么就显示什么。
+    const modes = visibleWebQuotaModes.filter((mode) => windowsByMode.has(mode));
+    if (modes.length === 0) return <span className="text-xs text-muted-foreground">{t("accounts.quotaNotSynced")}</span>;
+    if (modes.length === 1) {
+      const only = windowsByMode.get(modes[0])!;
+      return <WebQuotaMode mode={formatWebQuotaMode(modes[0])} window={only} locale={locale} recoveryProbe={only.remaining === 0} />;
     }
-    if (tier === "basic" && fast) return <WebQuotaMode mode="Fast" window={fast} locale={locale} />;
     return (
-      <div className="grid w-full min-w-0 grid-cols-5 divide-x divide-border/70">
-        {visibleWebQuotaModes.map((mode) => {
-          const window = windowsByMode.get(mode);
-          if (!window) {
-            return <div key={mode} className="min-w-0 px-2 first:pl-0 last:pr-0"><div className="flex items-center justify-between gap-1 text-[11px]"><span className="truncate capitalize text-muted-foreground">{mode}</span><span className="text-muted-foreground">-</span></div><div className="mt-1.5 h-1.5 rounded-full bg-muted" /></div>;
-          }
-          return <WebQuotaMode key={mode} mode={formatWebQuotaMode(mode)} window={window} locale={locale} compact />;
+      <div className="grid w-full min-w-0 divide-x divide-border/70" style={{ gridTemplateColumns: `repeat(${modes.length}, minmax(0, 1fr))` }}>
+        {modes.map((mode) => {
+          const window = windowsByMode.get(mode)!;
+          return <WebQuotaMode key={mode} mode={formatWebQuotaMode(mode)} window={window} locale={locale} compact recoveryProbe={window.remaining === 0} />;
         })}
       </div>
     );
