@@ -239,8 +239,15 @@ func validateVideoRouteParameters(providerValue account.Provider, operation prov
 	}
 	trimmedModel := strings.TrimSpace(upstreamModel)
 	hasReferences := referenceCount > 0
-	if providerValue == account.ProviderWeb && (hasImage || hasReferences) {
-		return fmt.Errorf("%w: Grok Web 当前仅支持文本生视频；图片视频请使用 Build 或 Console Provider", ErrVideoOperationUnsupported)
+	if providerValue == account.ProviderWeb {
+		// Grok Web supports image-to-video (one first-frame image) and
+		// reference-to-video (up to 7 pictures) through Imagine mediaGenInput.
+		if hasImage && hasReferences {
+			return fmt.Errorf("%w: image 与 reference_images 不能同时使用", ErrVideoParameterInvalid)
+		}
+		if referenceCount > provider.ConsoleVideoMaxReferenceImages {
+			return fmt.Errorf("%w: Grok Web reference_images 最多 %d 张，当前为 %d 张", ErrVideoParameterInvalid, provider.ConsoleVideoMaxReferenceImages, referenceCount)
+		}
 	}
 	if providerValue == account.ProviderConsole && (trimmedModel == "grok-imagine-video" || trimmedModel == "grok-imagine-video-1.5") {
 		// 实测：8 张 reference_images 上游回 400
