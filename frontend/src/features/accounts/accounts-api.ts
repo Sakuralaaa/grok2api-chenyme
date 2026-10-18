@@ -226,11 +226,30 @@ type ListAccountsInput = {
   risk?: string;
   agreement?: string;
   association?: string;
+  emailDomain?: string;
   // 为空时返回全部 provider 的账号，用于跨 provider 的通用名单（如请求审计筛选）。
   provider?: AccountProvider;
   sortBy?: string;
   sortOrder?: SortOrder;
 };
+
+export type AccountEmailDomainDTO = { domain: string; count: number };
+
+// "__none__" is the backend bucket for accounts without a registered email.
+export const accountEmailDomainNone = "__none__";
+
+function decodeAccountEmailDomains(value: unknown): AccountEmailDomainDTO[] {
+  const items = value && typeof value === "object" && Array.isArray((value as { items?: unknown }).items) ? (value as { items: unknown[] }).items : [];
+  return items.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const { domain, count } = item as { domain?: unknown; count?: unknown };
+    return typeof domain === "string" && typeof count === "number" ? [{ domain, count }] : [];
+  });
+}
+
+export function listAccountEmailDomains(provider: AccountProvider): Promise<AccountEmailDomainDTO[]> {
+  return apiRequest(`/api/admin/v1/accounts/email-domains?${new URLSearchParams({ provider })}`, {}, decodeAccountEmailDomains);
+}
 
 export function listAccounts(input: ListAccountsInput): Promise<PaginatedDTO<AccountDTO>> {
   const query = new URLSearchParams({ page: String(input.page), pageSize: String(input.pageSize) });
@@ -242,6 +261,7 @@ export function listAccounts(input: ListAccountsInput): Promise<PaginatedDTO<Acc
   if (input.risk) query.set("risk", input.risk);
   if (input.agreement) query.set("agreement", input.agreement);
   if (input.association) query.set("association", input.association);
+  if (input.emailDomain) query.set("emailDomain", input.emailDomain);
   if (input.sortBy && input.sortOrder) {
     query.set("sortBy", input.sortBy);
     query.set("sortOrder", input.sortOrder);
