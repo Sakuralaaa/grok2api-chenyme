@@ -24,6 +24,50 @@ type generationTiming struct {
 	firstBody      time.Duration
 	attempts       int
 	finished       bool
+	// Request-scoped diagnostics (identifiers and enums only).
+	requestID     string
+	accountID     uint64
+	accountsTried []uint64
+	errorCode     string
+	searchStrikes int
+	searchRate    float64
+	searchSamples int
+	streaming     bool
+}
+
+// setRequest records the request id and streaming flag for diagnostics.
+func (t *generationTiming) setRequest(requestID string, streaming bool) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.requestID, t.streaming = requestID, streaming
+	t.mu.Unlock()
+}
+
+// markAccount records an account the request was sent to. The last one is the
+// account that served (or finally failed) the request.
+func (t *generationTiming) markAccount(accountID uint64) {
+	if t == nil || accountID == 0 {
+		return
+	}
+	t.mu.Lock()
+	t.accountID = accountID
+	if n := len(t.accountsTried); (n == 0 || t.accountsTried[n-1] != accountID) && n < 16 {
+		t.accountsTried = append(t.accountsTried, accountID)
+	}
+	t.mu.Unlock()
+}
+
+// setOutcomeDetail records the terminal error code and the serving account's
+// recent search-health snapshot.
+func (t *generationTiming) setOutcomeDetail(errorCode string, strikes int, rate float64, samples int) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.errorCode, t.searchStrikes, t.searchRate, t.searchSamples = errorCode, strikes, rate, samples
+	t.mu.Unlock()
 }
 
 func newGenerationTiming(route string, provider accountdomain.Provider) *generationTiming {
@@ -78,6 +122,16 @@ func (t *generationTiming) finish(logger *slog.Logger, outcome string) {
 		"upstream_wait_ms", t.upstreamWait.Milliseconds(), "first_headers_ms", t.firstHeaders.Milliseconds(),
 		"first_body_ms", t.firstBody.Milliseconds(), "attempts", t.attempts, "retries", retries,
 	}
+	diagnostic := t.requestID != "" || t.accountID != 0
+	if diagnostic {
+		fields = append(fields, "request_id", t.requestID, "streaming", t.streaming, "account_id", t.accountID, "accounts_tried", t.accountsTried)
+		if t.errorCode != "" {
+			fields = append(fields, "error_code", t.errorCode)
+		}
+		if t.searchSamples > 0 || t.searchStrikes > 0 {
+			fields = append(fields, "search_strikes", t.searchStrikes, "search_success_rate", t.searchRate, "search_samples", t.searchSamples)
+		}
+	}
 	t.mu.Unlock()
 	labels := perfmetrics.Labels{Subsystem: "gateway", Provider: string(t.provider), Outcome: outcome}
 	perfmetrics.Default.ObserveDuration("request_duration_us", labels, total)
@@ -87,6 +141,12 @@ func (t *generationTiming) finish(logger *slog.Logger, outcome string) {
 	perfmetrics.Default.Add("attempt_count", labels, int64(t.attempts))
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if diagnostic {
+		// One structured line per request so operators can trace routing,
+		// retries and the outcome without enabling debug logging.
+		logger.Info("request_diagnostics", fields...)
+		return
 	}
 	logger.Debug("generation_timing", fields...)
 }
