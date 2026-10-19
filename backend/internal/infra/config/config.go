@@ -68,6 +68,7 @@ type Config struct {
 	Routing           RoutingConfig           `yaml:"routing"`
 	Audit             AuditConfig             `yaml:"audit"`
 	QualityGuard      QualityGuardConfig      `yaml:"qualityGuard"`
+	AccountRegistrar  AccountRegistrarConfig  `yaml:"accountRegistrar"`
 	ClientKeyDefaults ClientKeyDefaultsConfig `yaml:"clientKeyDefaults"`
 	Accounts          AccountsConfig          `yaml:"-"`
 }
@@ -287,6 +288,46 @@ type QualityGuardConfig struct {
 	// visible output and no reasoning, then retries on another account.
 	RequestRetry QualityGuardRequestRetryConfig `yaml:"requestRetry"`
 }
+
+// AccountRegistrarConfig 描述可选的「自动补号」sidecar。
+// Docker Compose 控制 sidecar 是否启动；Enabled 是服务端对内部接口的授权开关。
+type AccountRegistrarConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// BaseURL 指向注册机 sidecar 的 HTTP 入口，例如 http://account-registrar:8099。
+	BaseURL string `yaml:"baseURL"`
+	// CallbackURL 是 sidecar 回传 SSO 时使用的 grok2api 地址。
+	CallbackURL string `yaml:"callbackURL"`
+	// Domains 是允许的收信域名，同时下发给 sidecar 作为默认值。
+	Domains []string `yaml:"domains"`
+	// MaxCount 限制单次补号数量，避免一次点击把号池打满。
+	MaxCount int `yaml:"maxCount"`
+	// AppDir 是容器内注册机目录，Proxy 是给注册机用的代理（可留空）。
+	AppDir string `yaml:"appDir"`
+	Proxy  string `yaml:"proxy"`
+	// GeoIPIP 用于 camoufox 的时区/语言匹配，留空则由 sidecar 自行探测。
+	GeoIPIP string `yaml:"geoipIP"`
+	// Timeout 是管理端请求 sidecar 的超时，JobTimeout 是单次注册的上限。
+	Timeout    Duration `yaml:"timeout"`
+	JobTimeout Duration `yaml:"jobTimeout"`
+}
+
+func validateAccountRegistrarConfig(value AccountRegistrarConfig) error {
+	if !value.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(value.BaseURL) == "" {
+		return errors.New("accountRegistrar 已启用，但未配置 baseURL")
+	}
+	if value.MaxCount < 1 || value.MaxCount > 20 {
+		return errors.New("accountRegistrar.maxCount 必须在 1 到 20 之间")
+	}
+	if value.Timeout.Value() < time.Second || value.Timeout.Value() > time.Minute {
+		return errors.New("accountRegistrar.timeout 必须在 1 秒到 1 分钟之间")
+	}
+	if value.JobTimeout.Value() < time.Minute || value.JobTimeout.Value() > 2*time.Hour {
+		return errors.New("accountRegistrar.jobTimeout 必须在 1 分钟到 2 小时之间")
+	}
+	return nil
 
 // QualityGuardRequestRetryConfig holds the in-process missing-thinking withhold policy.
 type QualityGuardRequestRetryConfig struct {
@@ -713,6 +754,9 @@ func (c Config) Validate() error {
 	if err := validateQualityGuardConfig(c.QualityGuard); err != nil {
 		return err
 	}
+	if err := validateAccountRegistrarConfig(c.AccountRegistrar); err != nil {
+		return err
+	}
 	if c.ClientKeyDefaults.RPMLimit < 1 || c.ClientKeyDefaults.RPMLimit > clientkeydomain.MaxRPMLimit || c.ClientKeyDefaults.MaxConcurrent < 1 || c.ClientKeyDefaults.MaxConcurrent > clientkeydomain.MaxConcurrent {
 		return errors.New("clientKeyDefaults 超出允许范围")
 	}
@@ -958,6 +1002,10 @@ func defaultConfig() Config {
 				AccountCooldown: Duration(12 * time.Hour), IdleAccountCooldown: Duration(15 * time.Minute),
 				MinEncryptedBytes: 256, EncryptedBytesPerReasoningToken: 4,
 			},
+		},
+		AccountRegistrar: AccountRegistrarConfig{
+			MaxCount: 5, Timeout: Duration(15 * time.Second), JobTimeout: Duration(20 * time.Minute),
+			CallbackURL: "http://grok2api:8000", AppDir: "/opt/registrar-app",
 		},
 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: clientkeydomain.DefaultRPMLimit, MaxConcurrent: clientkeydomain.DefaultMaxConcurrent},
 		Accounts: AccountsConfig{

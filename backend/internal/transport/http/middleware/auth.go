@@ -88,6 +88,19 @@ func QualityGuardAuth(expected string) gin.HandlerFunc {
 	}
 }
 
+// RegistrarAuth accepts only the process-scoped token shared with the
+// account-registrar sidecar. It is intentionally separate from administrator JWTs.
+func RegistrarAuth(expected string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		raw, ok := bearerToken(c.GetHeader("Authorization"))
+		if !ok || len(raw) != len(expected) || subtle.ConstantTimeCompare([]byte(raw), []byte(expected)) != 1 {
+			response.Error(c, http.StatusUnauthorized, "registrarUnauthorized", "注册机内部认证失败")
+			return
+		}
+		c.Next()
+	}
+}
+
 // ClientAuth 校验下游 API Key，并在请求结束时释放并发租约。
 func ClientAuth(service *clientkeyapp.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {

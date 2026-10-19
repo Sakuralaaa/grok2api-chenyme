@@ -179,3 +179,28 @@ qualityGuard:
     idleAccountCooldown: 15m
     minEncryptedBytes: 256
     encryptedBytesPerReasoningToken: 4
+
+# ============================ ACCOUNT REGISTRAR (可选) ============================
+# 自动补号 sidecar。需要同时启用 docker compose 的 registrar profile：
+#   docker compose --profile registrar up -d
+# 主程序会把内部令牌写进 registrar_state 卷里的 bootstrap.json，sidecar 读取后启动。
+accountRegistrar:
+  enabled: false
+  # sidecar 的 HTTP 入口（compose 服务名 + 容器内端口）
+  baseURL: "http://account-registrar:8099"
+  # sidecar 回传 SSO 时使用的 grok2api 地址（容器网络内网地址）
+  callbackURL: "http://grok2api:8000"
+  # 允许的收信域名，同时作为管理端下拉框的默认值
+  domains: []
+  # 单次补号上限，防止一次点击把号池打满
+  maxCount: 5
+  # 管理端请求 sidecar 的超时
+  timeout: 15s
+  # 单次注册任务的上限
+  jobTimeout: 20m
+  # 容器内注册机目录（与 registrar 服务的挂载点一致）
+  appDir: /opt/registrar-app
+  # 给注册机用的代理；留空则直连。带认证的 socks5 请改用 sidecar 的 RELAY_UPSTREAM。
+  proxy: ""
+  # camoufox 使用的出口 IP，用于时区/语言匹配（走代理时建议填写）
+  geoipIP: ""

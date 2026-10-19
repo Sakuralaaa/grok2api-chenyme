@@ -19,6 +19,7 @@ import (
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
 	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
+	infraregistrar "github.com/chenyme/grok2api/backend/internal/infra/registrar"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	adminauthhttp "github.com/chenyme/grok2api/backend/internal/transport/http/adminauth"
 	audithttp "github.com/chenyme/grok2api/backend/internal/transport/http/audit"
@@ -65,6 +66,8 @@ type Dependencies struct {
 	QualityGuardConfigPath string
 	QualityGuardToken      string
 	QualityGuardProbe      egressapp.QualityProbeInput
+	Registrar              *infraregistrar.Client
+	RegistrarToken         string
 	Updates                *updatecheckapp.Service
 }
 
@@ -149,7 +152,9 @@ func New(deps Dependencies) *gin.Engine {
 	adminProtected := adminRoot.Group("")
 	adminProtected.Use(middleware.AdminAuth(deps.AdminAuth))
 	authHandler.RegisterAuthenticated(adminProtected)
-	accounthttp.NewHandler(deps.Accounts, deps.AccountSync).Register(adminProtected)
+	accountHandler := accounthttp.NewHandler(deps.Accounts, deps.AccountSync)
+	accountHandler.Register(adminProtected)
+	accountHandler.WithRegistrar(deps.Registrar).RegisterRegistrar(adminProtected)
 	modelhttp.NewHandler(deps.Models).Register(adminProtected)
 	clientkeyhttp.NewHandler(deps.ClientKeys).Register(adminProtected)
 	auditHandler := audithttp.NewHandler(deps.Audits)
@@ -171,6 +176,12 @@ func New(deps Dependencies) *gin.Engine {
 		qualityGuardInternal.Use(middleware.QualityGuardAuth(deps.QualityGuardToken))
 		audithttp.NewQualityGuardHandler(deps.Audits, deps.QualityGuardProbe.ClientKeyID).RegisterQualityGuard(qualityGuardInternal)
 		egressHandler.RegisterQualityGuard(qualityGuardInternal)
+	}
+
+	if deps.RegistrarToken != "" {
+		registrarInternal := router.Group("/api/internal/v1/account-registrar")
+		registrarInternal.Use(middleware.RegistrarAuth(deps.RegistrarToken))
+		accountHandler.RegisterRegistrarInternal(registrarInternal)
 	}
 
 	v1 := router.Group("/v1")

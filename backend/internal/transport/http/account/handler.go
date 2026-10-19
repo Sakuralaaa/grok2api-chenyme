@@ -17,6 +17,7 @@ import (
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
+	infraregistrar "github.com/chenyme/grok2api/backend/internal/infra/registrar"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"github.com/chenyme/grok2api/backend/internal/shared/response"
 	"github.com/gin-gonic/gin"
@@ -44,8 +45,9 @@ const (
 )
 
 type Handler struct {
-	service *accountapp.Service
-	sync    accountSynchronizer
+	service   *accountapp.Service
+	sync      accountSynchronizer
+	registrar *infraregistrar.Client
 }
 
 type accountSyncPipeline struct {
