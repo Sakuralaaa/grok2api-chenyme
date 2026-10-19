@@ -1,0 +1,4 @@
+# 容器入口脚本必须保持 LF，否则 Linux 容器里会因 CRLF 无法执行
+*.sh text eol=lf
+Dockerfile text eol=lf
+tools/account-registrar/*.py text eol=lf

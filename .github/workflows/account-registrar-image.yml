@@ -1,0 +1,195 @@
+name: Account Registrar Image
+
+# 注册机 sidecar 独立镜像：带 Camoufox/Firefox + Xvfb，体积远大于主镜像，
+# 所以单独构建、单独发布，不打进 grok2api 主镜像。
+on:
+  push:
+    branches:
+      - main
+      - "feat/**"
+      - "fix/**"
+    paths:
+      - "tools/account-registrar/**"
+      - ".github/workflows/account-registrar-image.yml"
+  pull_request:
+    paths:
+      - "tools/account-registrar/**"
+  workflow_dispatch:
+
+concurrency:
+  group: account-registrar-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify sidecar
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python syntax check
+        run: |
+          python -m py_compile \
+            tools/account-registrar/registrar_agent.py \
+            tools/account-registrar/relay.py
+
+      - name: Shell syntax check
+        run: sh -n tools/account-registrar/entrypoint.sh
+
+  build:
+    name: Build image (${{ matrix.arch }})
+    if: github.event_name != 'push'
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./tools/account-registrar/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: false
+          cache-from: type=gha,scope=account-registrar-${{ matrix.arch }}
+          provenance: false
+          sbom: false
+
+  publish:
+    name: Publish image (${{ matrix.arch }})
+    if: github.event_name == 'push'
+    needs: verify
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Normalize image name
+        id: image
+        shell: bash
+        run: |
+          owner=$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+          echo "name=ghcr.io/${owner}/grok2api-account-registrar" >> "$GITHUB_OUTPUT"
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=branch,suffix=-${{ matrix.arch }}
+            type=raw,value=latest-${{ matrix.arch }},enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,format=short,suffix=-${{ matrix.arch }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./tools/account-registrar/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=account-registrar-${{ matrix.arch }}
+          cache-to: type=gha,scope=account-registrar-${{ matrix.arch }},mode=max
+          provenance: mode=max
+          sbom: true
+
+  merge:
+    name: Merge image
+    if: github.event_name == 'push'
+    needs:
+      - publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Normalize image name
+        id: image
+        shell: bash
+        run: |
+          owner=$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+          echo "name=ghcr.io/${owner}/grok2api-account-registrar" >> "$GITHUB_OUTPUT"
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,format=short
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list
+        shell: bash
+        run: |
+          jq -cr '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON" | while read -r tag; do
+            docker buildx imagetools create \
+              -t "$tag" \
+              "${tag}-amd64" \
+              "${tag}-arm64"
+          done
+
+      - name: Inspect image
+        run: docker buildx imagetools inspect "${{ steps.image.outputs.name }}:${{ steps.meta.outputs.version }}"
