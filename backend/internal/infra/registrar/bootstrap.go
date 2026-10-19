@@ -49,12 +49,12 @@ func StateDir() string {
 // Prepare 写出 sidecar 的 bootstrap 文件，并返回服务端认可的内部令牌。
 // 令牌由 jwtSecret 做域分离派生，不经任何 API 暴露；未启用时返回空串。
 func Prepare(path string, value config.AccountRegistrarConfig, jwtSecret string) (string, error) {
+	if !value.Enabled {
+		return "", nil
+	}
 	path = strings.TrimSpace(path)
 	if path == "" {
-		if value.Enabled {
-			return "", errors.New("accountRegistrar 已启用，但未配置内部 bootstrap 文件路径")
-		}
-		return "", nil
+		return "", errors.New("accountRegistrar 已启用，但未配置内部 bootstrap 文件路径")
 	}
 	token := ""
 	if value.Enabled {
