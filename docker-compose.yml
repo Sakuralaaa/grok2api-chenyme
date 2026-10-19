@@ -11,10 +11,12 @@ services:
       # 非空时覆盖 config.yaml 的 PostgreSQL DSN，并自动启用 postgres。
       GROK2API_DATABASE_URL: "${GROK2API_DATABASE_URL:-}"
       GROK2API_QUALITY_GUARD_DIR: /var/lib/grok2api-quality-guard
+      GROK2API_ACCOUNT_REGISTRAR_DIR: /var/lib/grok2api-account-registrar
     volumes:
       - "${GROK2API_CONFIG:-./config.yaml}:/run/grok2api/config.yaml:ro"
       - grok2api-data:/app/data
       - quality_guard_state:/var/lib/grok2api-quality-guard
+      - registrar_state:/var/lib/grok2api-account-registrar
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
@@ -101,8 +103,10 @@ services:
       # 注册机本体（含 config.json / accounts/）挂进来，镜像内不含注册机源码
       - "${REGISTRAR_APP_PATH:-./registrar-app}:/opt/registrar-app"
       - registrar_out:/out
+      # 与主程序共享：主程序写入 bootstrap.json（含内部令牌），sidecar 读取
+      - registrar_state:/var/lib/grok2api-account-registrar
     shm_size: "1gb"
-    restart: "no"
+    restart: unless-stopped
     init: true
     stop_grace_period: 30s
     security_opt:
@@ -111,3 +115,4 @@ volumes:
   grok2api-data:
   quality_guard_state:
   registrar_out:
+  registrar_state:
