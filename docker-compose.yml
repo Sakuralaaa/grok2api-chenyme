@@ -77,6 +77,37 @@ services:
     security_opt:
       - no-new-privileges:true
 
+
+  # ================================ ACCOUNT REGISTRAR ================================
+  # 注册机 sidecar（可选）。带 Camoufox/Firefox + Xvfb，镜像 1.2~1.5 GB，
+  # 由 .github/workflows/account-registrar-image.yml 构建并发布到 GHCR。
+  # 一次性试跑：docker compose --profile registrar run --rm account-registrar --once
+
+  account-registrar:
+    container_name: grok2api-account-registrar
+    profiles: ["registrar"]
+    image: "${REGISTRAR_IMAGE:-ghcr.io/sakuralaaa/grok2api-account-registrar:latest}"
+    environment:
+      REGISTRAR_COUNT: "${REGISTRAR_COUNT:-1}"
+      REGISTRAR_DOMAINS: "${REGISTRAR_DOMAINS:-}"
+      REGISTRAR_APP_DIR: /opt/registrar-app
+      REGISTRAR_OUT_DIR: /out
+      CAMOUFOX_GEOIP_IP: "${CAMOUFOX_GEOIP_IP:-}"
+      # 带认证 socks5 必须走本地转发，填上游 URL 即可（入口会自动指向转发口）
+      RELAY_UPSTREAM: "${RELAY_UPSTREAM:-}"
+      REGISTRAR_PROXY: "${REGISTRAR_PROXY:-}"
+      TZ: "${TZ:-Asia/Shanghai}"
+    volumes:
+      # 注册机本体（含 config.json / accounts/）挂进来，镜像内不含注册机源码
+      - "${REGISTRAR_APP_PATH:-./registrar-app}:/opt/registrar-app"
+      - registrar_out:/out
+    shm_size: "1gb"
+    restart: "no"
+    init: true
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
 volumes:
   grok2api-data:
   quality_guard_state:
+  registrar_out:
