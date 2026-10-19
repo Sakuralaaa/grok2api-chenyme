@@ -8,6 +8,11 @@ mkdir -p "${quality_guard_dir}"
 chown grok2api:grok2api "${quality_guard_dir}"
 chmod 0700 "${quality_guard_dir}"
 
+registrar_dir="${GROK2API_ACCOUNT_REGISTRAR_DIR:-/var/lib/grok2api-account-registrar}"
+mkdir -p "${registrar_dir}"
+chown grok2api:grok2api "${registrar_dir}"
+chmod 0700 "${registrar_dir}"
+
 if [ ! -f "${GROK2API_CONFIG_SOURCE}" ]; then
   echo "missing config: ${GROK2API_CONFIG_SOURCE}" >&2
   echo "mount config.yaml to /run/grok2api/config.yaml" >&2
