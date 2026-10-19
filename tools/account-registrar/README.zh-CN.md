@@ -17,14 +17,15 @@ grok2api 负责入库、同步和质检。
 - `linux/arm64` 跑在 `ubuntu-24.04-arm`（原生 ARM，不走 QEMU）
 - 两个架构各自推 `<tag>-amd64` / `<tag>-arm64`，最后合并成 manifest list
 
-发布地址：`ghcr.io/<owner>/grok2api-account-registrar:<tag>`
+发布地址：`ghcr.io/<owner>/<repo>/account-registrar:<tag>`
+挂在主仓库的 namespace 下，和主镜像同一个包来源，拉取时不用换仓库。
 `latest` 只在 `main` 分支推送时生成；其它分支用分支名或 `sha-<短哈希>`。
 
 拉取前先登录（包默认私有）：
 
 ```bash
 echo "$GHCR_PAT" | docker login ghcr.io -u <你的用户名> --password-stdin
-docker pull ghcr.io/<owner>/grok2api-account-registrar:latest
+docker pull ghcr.io/<owner>/<repo>/account-registrar:latest
 ```
 
 ## 镜像里有什么 / 没有什么
@@ -50,7 +51,7 @@ docker run --rm -it \
   -v "$PWD/out:/out" \
   -e REGISTRAR_COUNT=1 \
   -e REGISTRAR_DOMAINS=edu.sakural.app \
-  ghcr.io/<owner>/grok2api-account-registrar:latest --once
+  ghcr.io/<owner>/<repo>/account-registrar:latest --once
 ```
 
 成功时 stdout 是任务 JSON（`"status": "done"`、`"imported": 1`），

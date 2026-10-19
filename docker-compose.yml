@@ -86,7 +86,7 @@ services:
   account-registrar:
     container_name: grok2api-account-registrar
     profiles: ["registrar"]
-    image: "${REGISTRAR_IMAGE:-ghcr.io/sakuralaaa/grok2api-account-registrar:latest}"
+    image: "${REGISTRAR_IMAGE:-ghcr.io/sakuralaaa/grok2api-chenyme/account-registrar:latest}"
     environment:
       REGISTRAR_COUNT: "${REGISTRAR_COUNT:-1}"
       REGISTRAR_DOMAINS: "${REGISTRAR_DOMAINS:-}"
