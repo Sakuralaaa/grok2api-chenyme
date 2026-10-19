@@ -328,6 +328,7 @@ func validateAccountRegistrarConfig(value AccountRegistrarConfig) error {
 		return errors.New("accountRegistrar.jobTimeout 必须在 1 分钟到 2 小时之间")
 	}
 	return nil
+}
 
 // QualityGuardRequestRetryConfig holds the in-process missing-thinking withhold policy.
 type QualityGuardRequestRetryConfig struct {
