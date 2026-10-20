@@ -182,6 +182,10 @@ def snapshot_accounts(app_dir: str) -> dict[str, float]:
     for name in os.listdir(root):
         if not name.endswith(ACCOUNT_FILE_SUFFIX):
             continue
+        # 注册机会在同一 accounts/ 目录里写 mail_credentials.txt 之类的边角文件，
+        # 只有「邮箱@域名.txt」才是账号产物，否则会被当成解析失败的账号上报。
+        if "@" not in name[: -len(ACCOUNT_FILE_SUFFIX)]:
+            continue
         try:
             result[name] = os.path.getmtime(os.path.join(root, name))
         except OSError:
