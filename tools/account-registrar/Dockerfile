@@ -21,7 +21,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Firefox + Xvfb 运行库。多架构（amd64/arm64）都用官方 python 基础镜像，
 # 由 GitHub Actions 分别在原生 runner 上构建，不走 QEMU。
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      xvfb xauth ca-certificates curl tini \
+      xvfb xauth ca-certificates curl tini tk \
       libasound2 libatk1.0-0 libatk-bridge2.0-0 libcairo2 libcups2 \
       libdbus-1-3 libdbus-glib-1-2 libdrm2 libexpat1 libfontconfig1 \
       libfreetype6 libgbm1 libglib2.0-0 libgtk-3-0 libnspr4 libnss3 \
