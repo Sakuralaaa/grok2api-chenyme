@@ -315,7 +315,12 @@ def run_registrar_cli(config: Config, env_extra: dict[str, str], timeout: int) -
         timeout=timeout,
         env=env,
     )
-    tail = (process.stdout or "")[-LOG_LIMIT:]
+    # stderr 必须一起带上：CLI 的致命错误（缺库、配置非法）几乎只打在 stderr 上，
+    # 只取 stdout 会让失败原因变成空白，面板上就只剩“未产出新账号”。
+    combined = (process.stdout or "") + (("\n" + process.stderr) if process.stderr else "")
+    tail = combined[-LOG_LIMIT:]
+    if process.returncode != 0:
+        log("注册机退出码 %d：%s" % (process.returncode, tail[-600:].replace("\n", " | ")))
     return process.returncode, tail
 
 
@@ -401,7 +406,7 @@ def run_job(job: Job, config: Config) -> None:
                 job.failed += 1
                 job.items.append({"email": email, "status": "failed", "reason": reason})
         if not fresh:
-            job.update(last_error="注册机未产出新账号 (exit=%d): %s" % (code, tail[-400:]))
+            job.update(last_error="注册机未产出新账号 (exit=%d): %s" % (code, tail[-800:]))
     except subprocess.TimeoutExpired:
         job.update(last_error="注册机执行超时")
     except Exception as exc:  # noqa: BLE001 - 任务级兜底
