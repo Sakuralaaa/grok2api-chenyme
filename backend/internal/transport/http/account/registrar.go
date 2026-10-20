@@ -1,11 +1,13 @@
 package account
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
+	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraregistrar "github.com/chenyme/grok2api/backend/internal/infra/registrar"
 	"github.com/chenyme/grok2api/backend/internal/shared/response"
 	"github.com/gin-gonic/gin"
@@ -151,7 +153,21 @@ func (h *Handler) registrarImportAccount(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "缺少邮箱或 SSO")
 		return
 	}
-	document := []byte(fmt.Sprintf("%s----%s----%s\n", email, strings.TrimSpace(request.Password), sso))
+	// 走 JSON 文档而不是纯文本：纯文本导入只提取 sso token，邮箱会被丢掉，
+	// 面板上就成了无邮箱账号。JSON 形态与手动导入能力一致，能带上邮箱与名称。
+	document, marshalErr := json.Marshal(map[string]any{
+		"provider": string(accountdomain.ProviderWeb),
+		"accounts": []map[string]string{{
+			"name":      email,
+			"email":     email,
+			"sso_token": sso,
+			"tier":      string(accountdomain.WebTierAuto),
+		}},
+	})
+	if marshalErr != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "凭据格式无效")
+		return
+	}
 	result, err := h.service.ImportWebCredentialDocumentsWithProgress(c.Request.Context(), [][]byte{document}, nil, nil)
 	if err != nil {
 		// 不回传错误细节，避免把凭据带进响应或审计日志。

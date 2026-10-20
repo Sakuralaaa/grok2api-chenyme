@@ -291,7 +291,11 @@ func fetchStatsigMetaContentWithDo(ctx context.Context, baseURL, token string, l
 		// protocol failure. Falling back here would hide a changed upstream page.
 		return extractStatsigMetaContent(index.body)
 	}
-	if index.statusCode != http.StatusNotFound {
+	// /index 历史上是带品牌的 404；近期上游会对它返回 307 临时跳转。
+	// 临时跳转说明页面仍会回到该路径，允许回落到根页面继续取 meta；
+	// 永久跳转（301/308）与 403/429/5xx 仍按协议变更直接报错。
+	if index.statusCode != http.StatusNotFound &&
+		index.statusCode != http.StatusFound && index.statusCode != http.StatusTemporaryRedirect {
 		return "", statsigMetaStatusError("/index", index.statusCode)
 	}
 	if content, extractErr := extractStatsigMetaContent(index.body); extractErr == nil {
