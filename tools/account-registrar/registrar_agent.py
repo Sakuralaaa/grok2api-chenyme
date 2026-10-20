@@ -49,8 +49,11 @@ class Config:
         self.base_url = str(cfg.get("base_url") or "").rstrip("/")
         self.app_dir = str(cfg.get("app_dir") or "")
         self.domains = [str(v).strip() for v in (cfg.get("domains") or []) if str(v).strip()]
-        self.proxy = str(cfg.get("proxy") or "").strip()
-        self.geoip_ip = str(cfg.get("geoip_ip") or "").strip()
+        # bootstrap.json 里的配置优先；为空时回退到容器环境变量，
+        # 这样 entrypoint 依据 RELAY_UPSTREAM 自动生成的 REGISTRAR_PROXY 在
+        # 常驻（按钮）模式下同样生效，而不只在 --once 模式生效。
+        self.proxy = str(cfg.get("proxy") or os.environ.get("REGISTRAR_PROXY") or "").strip()
+        self.geoip_ip = str(cfg.get("geoip_ip") or os.environ.get("CAMOUFOX_GEOIP_IP") or "").strip()
         self.max_count = max(1, min(int(cfg.get("max_count") or 5), MAX_JOB_ITEMS))
         self.job_timeout_seconds = max(120, int(cfg.get("job_timeout_seconds") or 900))
         self.python = str(cfg.get("python") or sys.executable)
@@ -73,16 +76,41 @@ class Config:
                 "domains": domains,
                 "proxy": os.environ.get("REGISTRAR_PROXY", ""),
                 "geoip_ip": os.environ.get("CAMOUFOX_GEOIP_IP", ""),
-                "max_count": os.environ.get("REGISTRAR_COUNT", "5"),
+                "max_count": os.environ.get("REGISTRAR_MAX_COUNT", "5"),
                 "job_timeout_seconds": os.environ.get("REGISTRAR_JOB_TIMEOUT", "900"),
             },
         })
 
 
+def _wait_for_file(path: str, timeout: float) -> bool:
+    deadline = time.time() + max(0.0, timeout)
+    while time.time() < deadline:
+        if os.path.exists(path):
+            return True
+        time.sleep(1)
+    return os.path.exists(path)
+
+
 def load_config() -> Config:
+    """优先读 bootstrap.json（同机共享卷）；没有就用环境变量（Zeabur 等 PaaS）。
+
+    Zeabur 的每个服务是独立容器，卷不跨服务共享，所以令牌与配置必须走环境变量。
+    """
     path = os.environ.get("REGISTRAR_BOOTSTRAP", DEFAULT_BOOTSTRAP)
-    with open(path, encoding="utf-8") as handle:
-        return Config(json.load(handle))
+    has_env_token = bool(str(os.environ.get("REGISTRAR_INTERNAL_TOKEN") or "").strip())
+    if has_env_token and not os.path.exists(path):
+        log("未找到 %s，改用环境变量配置" % path)
+        return Config.from_env()
+    wait_seconds = float(os.environ.get("REGISTRAR_BOOTSTRAP_WAIT") or 60)
+    if _wait_for_file(path, wait_seconds):
+        with open(path, encoding="utf-8") as handle:
+            return Config(json.load(handle))
+    if has_env_token:
+        log("等待 %s 超时，改用环境变量配置" % path)
+        return Config.from_env()
+    raise FileNotFoundError(
+        "未找到 %s：请挂载共享卷，或设置 REGISTRAR_INTERNAL_TOKEN 走环境变量模式" % path
+    )
 
 
 # --------------------------------------------------------------------------- 任务状态
@@ -177,32 +205,98 @@ def read_credentials(app_dir: str, name: str) -> tuple[str, str, str] | None:
     return email, password, sso
 
 
-def write_registrar_config(app_dir: str, count: int, domains: list[str], proxy: str) -> str:
-    """备份并改写注册机 config.json，返回备份路径。"""
+# 允许用环境变量覆盖注册机 config.json 里的敏感项，镜像内因此不必存任何密钥。
+REGISTRAR_ENV_CONFIG = {
+    "email_provider": "REGISTRAR_EMAIL_PROVIDER",
+    "cloudflare_api_base": "REGISTRAR_CLOUDFLARE_API_BASE",
+    "cloudflare_api_key": "REGISTRAR_CLOUDFLARE_API_KEY",
+    "cloudflare_auth_mode": "REGISTRAR_CLOUDFLARE_AUTH_MODE",
+    "cloudflare_custom_auth": "REGISTRAR_CLOUDFLARE_CUSTOM_AUTH",
+    "cloudflare_path_accounts": "REGISTRAR_CLOUDFLARE_PATH_ACCOUNTS",
+    "cloudflare_path_messages": "REGISTRAR_CLOUDFLARE_PATH_MESSAGES",
+    "duckmail_api_key": "REGISTRAR_DUCKMAIL_API_KEY",
+    "duckmail_api_base": "REGISTRAR_DUCKMAIL_API_BASE",
+    "yyds_api_key": "REGISTRAR_YYDS_API_KEY",
+    "yyds_jwt": "REGISTRAR_YYDS_JWT",
+    "mailnest_api_key": "REGISTRAR_MAILNEST_API_KEY",
+}
+
+
+def _registrar_config_base(app_dir: str) -> tuple[dict, bool]:
+    """取配置基线：优先已有的 config.json，否则用镜像自带的 config.example.json。"""
     path = os.path.join(app_dir, "config.json")
-    backup = path + ".registrar-sidecar.bak"
-    if os.path.exists(path) and not os.path.exists(backup):
-        shutil.copy2(path, backup)
-    with open(path, encoding="utf-8") as handle:
-        payload = json.load(handle)
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle), True
+    example = os.path.join(app_dir, "config.example.json")
+    if not os.path.exists(example):
+        raise RuntimeError("注册机目录缺少 config.json 与 config.example.json: %s" % app_dir)
+    with open(example, encoding="utf-8") as handle:
+        return json.load(handle), False
+
+
+def write_registrar_config(
+    app_dir: str, count: int, domains: list[str], proxy: str
+) -> tuple[str, bool]:
+    """写入本次任务用的 config.json，返回 (备份路径, 原本是否存在)。"""
+    path = os.path.join(app_dir, "config.json")
+    payload, existed = _registrar_config_base(app_dir)
+    backup = ""
+    if existed:
+        backup = path + ".registrar-sidecar.bak"
+        if not os.path.exists(backup):
+            shutil.copy2(path, backup)
     payload["register_count"] = max(1, count)
     payload["register_workers"] = 1
     payload["cpa_auto_add"] = False
+    payload["debug_mode"] = False
     if domains:
         payload["defaultDomains"] = ",".join(domains)
     payload["proxy"] = proxy
+    for field, env_name in REGISTRAR_ENV_CONFIG.items():
+        value = str(os.environ.get(env_name) or "").strip()
+        if value:
+            payload[field] = value
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=4)
-    return backup
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return backup, existed
 
 
-def restore_registrar_config(app_dir: str, backup: str) -> None:
+def restore_registrar_config(app_dir: str, backup: str, existed: bool) -> None:
+    """还原注册机配置：有备份就恢复，原本不存在就删掉生成的临时文件。"""
     path = os.path.join(app_dir, "config.json")
     try:
-        if os.path.exists(backup):
+        if existed and os.path.exists(backup):
             shutil.move(backup, path)
+        elif not existed and os.path.exists(path):
+            os.remove(path)
     except OSError as exc:
         log("恢复注册机配置失败: %r" % (exc,))
+
+
+def check_registrar_secrets() -> str:
+    """开跑前校验邮箱服务凭据，避免白跑一趟浏览器。"""
+    provider = str(os.environ.get("REGISTRAR_EMAIL_PROVIDER") or "cloudflare").strip().lower()
+    if provider == "cloudflare":
+        missing = [
+            name
+            for name in ("REGISTRAR_CLOUDFLARE_API_BASE", "REGISTRAR_CLOUDFLARE_API_KEY")
+            if not str(os.environ.get(name) or "").strip()
+        ]
+        if missing:
+            return "缺少邮件服务环境变量: %s" % ", ".join(missing)
+    elif provider == "duckmail" and not str(os.environ.get("REGISTRAR_DUCKMAIL_API_KEY") or "").strip():
+        return "缺少邮件服务环境变量: REGISTRAR_DUCKMAIL_API_KEY"
+    elif provider == "yyds" and not (
+        str(os.environ.get("REGISTRAR_YYDS_API_KEY") or "").strip()
+        or str(os.environ.get("REGISTRAR_YYDS_JWT") or "").strip()
+    ):
+        return "缺少邮件服务环境变量: REGISTRAR_YYDS_API_KEY 或 REGISTRAR_YYDS_JWT"
+    return ""
 
 
 def run_registrar_cli(config: Config, env_extra: dict[str, str], timeout: int) -> tuple[int, str]:
@@ -267,10 +361,14 @@ def run_job(job: Job, config: Config) -> None:
     job.update(status="running", started_at=time.time())
     before = snapshot_accounts(config.app_dir)
     backup = ""
+    existed = False
     try:
         if not os.path.isdir(config.app_dir):
             raise RuntimeError("注册机目录不存在: %s" % config.app_dir)
-        backup = write_registrar_config(config.app_dir, job.count, job.domains, config.proxy)
+        missing = check_registrar_secrets()
+        if missing:
+            raise RuntimeError(missing)
+        backup, existed = write_registrar_config(config.app_dir, job.count, job.domains, config.proxy)
         env_extra = {}
         if config.geoip_ip:
             env_extra["CAMOUFOX_GEOIP_IP"] = config.geoip_ip
@@ -310,8 +408,8 @@ def run_job(job: Job, config: Config) -> None:
         log("任务异常: %s" % traceback.format_exc(limit=3))
         job.update(last_error="任务异常: %r" % (exc,))
     finally:
-        if backup:
-            restore_registrar_config(config.app_dir, backup)
+        if backup or not existed:
+            restore_registrar_config(config.app_dir, backup, existed)
         job.update(
             status="canceled" if job.canceled else ("done" if job.imported else "failed"),
             finished_at=time.time(),
@@ -434,9 +532,17 @@ def run_once() -> int:
 def main() -> int:
     if "--once" in sys.argv:
         return run_once()
-    config = load_config()
+    try:
+        config = load_config()
+    except FileNotFoundError as exc:
+        log(str(exc))
+        return 2
+    if not config.enabled:
+        # 未启用时正常退出，避免在 PaaS 上被反复重启刷日志
+        log("补号功能未启用（accountRegistrar.enabled=false），退出")
+        return 0
     if not config.internal_token:
-        log("bootstrap 缺少 internal_token，拒绝启动")
+        log("缺少内部令牌（REGISTRAR_INTERNAL_TOKEN 或 bootstrap.json），拒绝启动")
         return 2
     Handler.config = config
     host = os.environ.get("REGISTRAR_LISTEN_HOST", "0.0.0.0")

@@ -41,6 +41,7 @@ PY
   fi
 fi
 
-# 注册机必须有头运行（Turnstile 反检测），用 Xvfb 提供虚拟显示
+# 注册机必须有头运行（Turnstile 反检测），用 Xvfb 提供虚拟显示。
+# DISPLAY 由 xvfb-run 注入，子进程（注册机 CLI 拉起的 Firefox）会继承。
 exec xvfb-run -a -s "-screen 0 1920x1080x24" \
-  python3 /opt/account-registrar/registrar_agent.py "$@"
+  python3 -u /opt/account-registrar/registrar_agent.py "$@"
