@@ -332,7 +332,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		database.Close()
 		return nil, err
 	}
-	registrarToken, err := infraregistrar.Prepare(filepath.Join(infraregistrar.StateDir(), "bootstrap.json"), cfg.AccountRegistrar, cfg.Secrets.JWTSecret)
+	registrarConfig := infraregistrar.ApplyEnvOverrides(cfg.AccountRegistrar)
+	registrarToken, err := infraregistrar.Prepare(filepath.Join(infraregistrar.StateDir(), "bootstrap.json"), registrarConfig, cfg.Secrets.JWTSecret)
 	if err != nil {
 		if runtimeStore != nil {
 			_ = runtimeStore.Close()
@@ -340,7 +341,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		database.Close()
 		return nil, err
 	}
-	registrarClient := infraregistrar.NewClient(cfg.AccountRegistrar, registrarToken)
+	registrarClient := infraregistrar.NewClient(registrarConfig, registrarToken)
 	auditService := auditapp.NewService(auditRepo, logger, cfg.Audit.BufferSize, cfg.Audit.BatchSize, cfg.Audit.FlushInterval.Value())
 	auditService.UpdateWriterConfig(cfg.Audit.BatchSize, cfg.Audit.FlushInterval.Value(), cfg.Audit.CommitDelay.Value())
 	auditService.UpdateLedgerConfig(auditLedgerConfig(cfg.Audit))

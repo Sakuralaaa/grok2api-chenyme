@@ -1,122 +1,155 @@
 # 账号注册机 sidecar
 
 把「注册机」以独立容器的方式接进 grok2api：注册机负责跑浏览器拿 SSO，
-grok2api 负责入库、同步和质检。
+grok2api 负责入库、同步和质检。管理端账号页会出现一个「自动补号」按钮。
 
-## 为什么是 sidecar，而不是塞进主镜像
+## 为什么是独立镜像
 
 注册机要过 Cloudflare Turnstile，必须真浏览器（Camoufox / Firefox）**有头**运行，
 还要 Xvfb 提供虚拟显示，镜像 1.2~1.5 GB。塞进主镜像会让 grok2api 的部署体积翻十几倍，
-所以拆成独立镜像，由 compose 的 `registrar` profile 按需启动，默认不跑。
+所以拆成独立镜像：`ghcr.io/<owner>/<repo>/account-registrar:<tag>`。
 
-## 镜像怎么来
+## 镜像里有什么
 
-由 `.github/workflows/account-registrar-image.yml` 在 GitHub Actions 上构建：
+- Python 3.12 + Camoufox（含已下载的 Firefox）+ Xvfb + CJK 字体
+- 注册机源码（`/opt/registrar-app`，只含 `config.example.json` 模板，**不含任何密钥**）
+- 本地 socks5 转发脚本
+- 内部 HTTP 接口（默认 `:8099`）
 
-- `linux/amd64` 跑在 `ubuntu-24.04`
-- `linux/arm64` 跑在 `ubuntu-24.04-arm`（原生 ARM，不走 QEMU）
-- 两个架构各自推 `<tag>-amd64` / `<tag>-arm64`，最后合并成 manifest list
+密钥一律通过环境变量注入，运行时会临时生成 `config.json`，任务结束自动清理。
 
-发布地址：`ghcr.io/<owner>/<repo>/account-registrar:<tag>`
-挂在主仓库的 namespace 下，和主镜像同一个包来源，拉取时不用换仓库。
-`latest` 只在 `main` 分支推送时生成；其它分支用分支名或 `sha-<短哈希>`。
+## 内部接口
 
-拉取前先登录（包默认私有）：
-
-```bash
-echo "$GHCR_PAT" | docker login ghcr.io -u <你的用户名> --password-stdin
-docker pull ghcr.io/<owner>/<repo>/account-registrar:latest
+```
+GET  /healthz                      健康检查（不需要令牌）
+POST /jobs                         {"count":1,"domains":["example.com"]}
+GET  /jobs/{id}                    任务快照
+POST /jobs/{id}/cancel             取消
 ```
 
-## 镜像里有什么 / 没有什么
+主程序通过 `Authorization: Bearer <内部令牌>` 调用；sidecar 回传凭据走主程序的
+`POST /api/internal/v1/account-registrar/accounts`（同一令牌）。
+**所有响应都不包含密码或 SSO。**
 
-有：Python 3.12、Camoufox 运行时 + 已下载的 Firefox、Xvfb、CJK 字体、中继脚本。
+## 令牌怎么来（两种模式）
 
-**没有注册机源码**。注册机本体在运行时挂载进来：
+| 模式 | 适用 | 做法 |
+|---|---|---|
+| 共享卷 | 同一台机器的 docker compose | 主程序把令牌写进 `registrar_state` 卷的 `bootstrap.json`，sidecar 读取。零配置 |
+| 环境变量 | Zeabur / K8s 等多容器平台 | 两侧注入同一个 `REGISTRAR_TOKEN`；主程序侧变量名是 `GROK2API_ACCOUNT_REGISTRAR_TOKEN` |
 
-```bash
--v /path/to/grokRegister-cpa:/opt/registrar-app
-```
+环境变量模式下主程序**不会**写 `bootstrap.json`，因此不依赖任何共享卷。
 
-镜像只做三件事：驱动 `/opt/registrar-app` 里的 `grok_register_ttk.py cli`、
-把产出的 `accounts/*.txt`（`邮箱----密码----SSO`）读出来、交给后端或写到 `/out`。
-
-## 先验证「容器里能不能注册成功」
-
-不带任何后端，跑一次性模式：
+生成一个令牌：
 
 ```bash
-docker run --rm -it \
-  -v /path/to/grokRegister-cpa:/opt/registrar-app \
-  -v "$PWD/out:/out" \
-  -e REGISTRAR_COUNT=1 \
-  -e REGISTRAR_DOMAINS=edu.sakural.app \
-  ghcr.io/<owner>/<repo>/account-registrar:latest --once
+openssl rand -hex 32
 ```
 
-成功时 stdout 是任务 JSON（`"status": "done"`、`"imported": 1`），
-凭据写进 `./out/registered-accounts.txt`（权限 600）。
+## 部署方式一：本机 docker compose
 
-失败时 `lastError` 会带注册机输出的尾部，重点看是不是：
+```bash
+docker login ghcr.io -u <你的用户名>     # PAT 需要 read:packages；或把包设为 public
+
+cat > .env <<'EOF'
+REGISTRAR_EMAIL_PROVIDER=cloudflare
+REGISTRAR_CLOUDFLARE_API_BASE=https://你的邮箱API
+REGISTRAR_CLOUDFLARE_API_KEY=你的管理密钥
+REGISTRAR_DOMAINS=edu.example.com
+EOF
+
+docker compose --profile registrar up -d
+```
+
+`config.yaml` 里打开开关：
+
+```yaml
+accountRegistrar:
+  enabled: true
+  baseURL: "http://account-registrar:8099"
+  callbackURL: "http://grok2api:8000"
+  domains: ["edu.example.com"]
+```
+
+## 部署方式二：Zeabur
+
+Zeabur 每个服务是独立容器，卷不跨服务共享，所以走**环境变量模式**。
+
+### 1. 让 Zeabur 能拉到镜像
+
+GHCR 包默认私有。二选一：
+
+- 把包设为 public：GitHub → 你的 Packages → `account-registrar` → Package settings → Change visibility
+- 或在 Zeabur 添加镜像服务时填入 GHCR 用户名 + PAT
+
+### 2. 在同一个项目里新增服务
+
+Zeabur 控制台 → 项目 `grok2api` → Add Service → **Docker Image** →
+填 `ghcr.io/<owner>/<repo>/account-registrar:latest`（建议用 `sha-xxxx` 锁定版本）。
+
+端口填 **8099**，类型 HTTP。**不需要绑定公网域名**（仅服务间调用）。
+
+资源建议 ≥ 2 GB 内存（要跑 Firefox）。
+
+### 3. 注册机服务的环境变量
+
+| 变量 | 必填 | 说明 |
+|---|---|---|
+| `REGISTRAR_INTERNAL_TOKEN` | ✅ | 与主程序同一个令牌 |
+| `GROK2API_BASE_URL` | ✅ | 主程序内网地址，例 `http://grok2api:8000` |
+| `REGISTRAR_EMAIL_PROVIDER` | ✅ | 目前用 `cloudflare` |
+| `REGISTRAR_CLOUDFLARE_API_BASE` | ✅ | 自建邮箱 API 根地址 |
+| `REGISTRAR_CLOUDFLARE_API_KEY` | ✅ | 邮箱 API 管理密钥 |
+| `REGISTRAR_DOMAINS` | ✅ | 收信域名，逗号分隔 |
+| `RELAY_UPSTREAM` | 可选 | 带认证 socks5 上游；填了会自动起本地转发并让浏览器走它 |
+| `CAMOUFOX_GEOIP_IP` | 可选 | 出口 IPv4，用于时区/语言匹配（走代理时建议填） |
+| `REGISTRAR_MAX_COUNT` | 可选 | 单次补号上限，默认 5 |
+
+### 4. 主程序服务的环境变量
+
+| 变量 | 说明 |
+|---|---|
+| `GROK2API_ACCOUNT_REGISTRAR_URL` | 注册机内网地址，例 `http://account-registrar:8099`。设置后自动视为启用 |
+| `GROK2API_ACCOUNT_REGISTRAR_TOKEN` | 与注册机同一个令牌 |
+| `GROK2API_ACCOUNT_REGISTRAR_DOMAINS` | 可选，面板下拉框的默认域名 |
+
+### 5. 验证
+
+主程序容器里：
+
+```bash
+npx zeabur@latest service exec --id <grok2api服务ID> -- \
+  wget -qO- --header="Authorization: Bearer $TOKEN" http://account-registrar:8099/healthz
+```
+
+返回 `{"data":{"ok":true,...}}` 即通。然后管理端账号页的「自动补号」按钮应当可用。
+
+## 内网地址怎么填
+
+同一项目内的服务可以直接用**服务名**当主机名（`http://account-registrar:8099`）。
+如果解析不到，在控制台该服务的网络页找到内部域名替换；最后的兜底是给它绑一个域名，
+把 `GROK2API_ACCOUNT_REGISTRAR_URL` 填成 `https://<域名>`（走公网 ingress 也能用）。
+
+## 常见问题
 
 | 现象 | 原因 |
 |---|---|
-| `appDir` 不存在 | 挂载路径写错，或 `REGISTRAR_APP_DIR` 没指到 |
-| `Cloudflare 拦截` / `Turnstile` 相关 | 出口 IP 脏，换节点重试 |
-| `注册机未产出新账号 (exit=...)` | 注册机自身报错，看 lastError 里的尾部日志 |
-
-## 用代理的情况
-
-带用户名密码的 socks5 **不能**直接给 Playwright：它会抛
-`Browser type launch: Browser does not support socks5 proxy authentication`。
-
-所以镜像内置了本地免认证转发：填上游 URL 就行，入口脚本会自动起转发并把
-`REGISTRAR_PROXY` 指过去。
-
-```bash
--e RELAY_UPSTREAM='socks5://user:pass@host:port'
-```
-
-注意两点：
-
-1. 上游若是 WARP 之类的落地，往往只接受「域名型」SOCKS5 请求，
-   用 `socks5://`（本地解析成 IPv4）会被直接断连——转发脚本统一按域名形式下发。
-2. 需要地理位置/时区匹配时额外给 `-e CAMOUFOX_GEOIP_IP=<上游出口 IPv4>`，
-   否则 Camoufox 的 `geoip=True` 会经代理去查公网 IP，撞上上面两个问题就报
-   `InvalidIP: Failed to get IP address`。
-
-## 环境变量
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `REGISTRAR_APP_DIR` | `/opt/registrar-app` | 注册机目录（挂载点） |
-| `REGISTRAR_COUNT` | `1` | 本次注册数量 |
-| `REGISTRAR_DOMAINS` | 空 | 收信域名，逗号分隔 |
-| `REGISTRAR_OUT_DIR` | `/out` | 一次性模式的凭据输出目录 |
-| `REGISTRAR_PROXY` | 空 | 给注册机用的代理；留空则直连 |
-| `RELAY_UPSTREAM` | 空 | 带认证 socks5 上游，填了就自动起转发 |
-| `CAMOUFOX_GEOIP_IP` | 空 | 指定的出口 IP，用于时区/语言匹配 |
-| `REGISTRAR_JOB_TIMEOUT` | `900` | 单次注册超时（秒） |
-| `GROK2API_BASE_URL` | 空 | 填了就走「注册完推给 grok2api」，不落盘 |
-
-## 两种运行模式
-
-**一次性（`--once`）**：注册完退出，适合验证链路是否通。
-
-**常驻服务**：不传 `--once` 就起 HTTP 服务，由 grok2api 管理端下发任务。
-需要 `bootstrap.json` 提供内部令牌，接口：
-
-```
-GET  /healthz
-POST /jobs                {"count":1,"domains":["..."]}
-GET  /jobs/{id}
-POST /jobs/{id}/cancel
-```
+| 面板按钮灰着，提示 sidecar 不可用 | 主程序没配 `GROK2API_ACCOUNT_REGISTRAR_URL`，或网络不通 |
+| `registrarUnauthorized` | 两侧令牌不一致 |
+| `缺少邮件服务环境变量: ...` | 邮箱 API 凭据没配 |
+| 注册机日志出现 `InvalidIP: Failed to get IP address` | 用了代理但没给 `CAMOUFOX_GEOIP_IP`，Camoufox 经代理查公网 IP 失败 |
+| `Browser does not support socks5 proxy authentication` | 把带账号密码的 socks5 直接给了 `REGISTRAR_PROXY`；改用 `RELAY_UPSTREAM` |
+| `Turnstile` / `Cloudflare 拦截` | 出口 IP 脏，换节点重试 |
+| 容器 OOM | 内存给太少，Firefox 起不来 |
 
 ## 安全提醒
 
-- 容器里会写出明文 SSO（`/out/registered-accounts.txt`，权限 600）。用完记得清。
-- 日志里不会打印密码或 SSO；但注册机自身的输出会落到 `lastError`，注意别外传。
-- 这个镜像默认以 root 运行（要写挂载目录的 `config.json` 并拉起浏览器）。
-  要降权的话，先确保挂载目录属主正确，再自行加 `USER`。
-- 邮箱服务的 admin key 会进注册机的 `config.json`，属于敏感信息，别提交进仓库。
+- 镜像内不含任何密钥；密钥只存在于环境变量与运行期临时文件（`config.json` 权限 0600）。
+- `--once` 模式会把凭据写到 `/out/registered-accounts.txt`（0600），用完请清理。
+- 日志不会打印密码或 SSO，但注册机的输出尾部会进入任务的 `lastError`。
+- 容器默认以 root 运行（要写 `/opt/registrar-app/config.json` 并拉起浏览器）。
+
+## 注册机源码来源
+
+`app/` 目录来自你自己的注册机项目，已剔除账号文件、日志、缓存与任何密钥，
+只保留源码、`LICENSE`、`README.md` 和一份脱敏的 `config.example.json`。

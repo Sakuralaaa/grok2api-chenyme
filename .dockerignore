@@ -33,3 +33,11 @@ backend/**/*_test.go
 !tools/egress-quality-guard/
 !tools/egress-quality-guard/quality_guard.py
 !tools/egress-quality-guard/session_rotator.py
+
+!tools/account-registrar/
+!tools/account-registrar/Dockerfile
+!tools/account-registrar/relay.py
+!tools/account-registrar/registrar_agent.py
+!tools/account-registrar/entrypoint.sh
+!tools/account-registrar/app/
+!tools/account-registrar/app/**

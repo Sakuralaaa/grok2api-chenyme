@@ -19,6 +19,14 @@ const bootstrapVersion = 1
 // StateDirEnv 让部署方覆写 sidecar 共享状态目录。
 const StateDirEnv = "GROK2API_ACCOUNT_REGISTRAR_DIR"
 
+// 以下环境变量让 PaaS（如 Zeabur）在没有共享卷的情况下也能接上 sidecar：
+// 直接把同一份令牌同时注入主程序与注册机容器。
+const (
+	TokenEnv   = "GROK2API_ACCOUNT_REGISTRAR_TOKEN"
+	URLEnv     = "GROK2API_ACCOUNT_REGISTRAR_URL"
+	DomainsEnv = "GROK2API_ACCOUNT_REGISTRAR_DOMAINS"
+)
+
 const defaultStateDir = "/var/lib/grok2api-account-registrar"
 
 type bootstrapFile struct {
@@ -46,20 +54,46 @@ func StateDir() string {
 	return defaultStateDir
 }
 
-// Prepare 写出 sidecar 的 bootstrap 文件，并返回服务端认可的内部令牌。
-// 令牌由 jwtSecret 做域分离派生，不经任何 API 暴露；未启用时返回空串。
+// ApplyEnvOverrides 用环境变量补齐配置，便于在 PaaS 上不改 config.yaml 就能接入。
+// 设置了 URL 即视为启用，避免再改一次配置文件。
+func ApplyEnvOverrides(value config.AccountRegistrarConfig) config.AccountRegistrarConfig {
+	if url := strings.TrimSpace(os.Getenv(URLEnv)); url != "" {
+		value.BaseURL = url
+		value.Enabled = true
+	}
+	if token := strings.TrimSpace(os.Getenv(TokenEnv)); token != "" {
+		value.Enabled = true
+	}
+	if raw := strings.TrimSpace(os.Getenv(DomainsEnv)); raw != "" {
+		domains := make([]string, 0, 4)
+		for _, item := range strings.Split(raw, ",") {
+			if trimmed := strings.TrimSpace(item); trimmed != "" {
+				domains = append(domains, trimmed)
+			}
+		}
+		if len(domains) > 0 {
+			value.Domains = domains
+		}
+	}
+	return value
+}
+
+// Prepare 返回服务端认可的内部令牌，并在需要时写出 sidecar 的 bootstrap 文件。
+// 令牌优先取显式环境变量（PaaS 多容器场景，无共享卷）；否则由 jwtSecret 做域分离派生。
+// 未启用时返回空串。
 func Prepare(path string, value config.AccountRegistrarConfig, jwtSecret string) (string, error) {
 	if !value.Enabled {
 		return "", nil
+	}
+	if token := strings.TrimSpace(os.Getenv(TokenEnv)); token != "" {
+		// 显式令牌已由部署方同时注入两侧，无需写共享卷文件
+		return token, nil
 	}
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return "", errors.New("accountRegistrar 已启用，但未配置内部 bootstrap 文件路径")
 	}
-	token := ""
-	if value.Enabled {
-		token = deriveToken(jwtSecret)
-	}
+	token := deriveToken(jwtSecret)
 	payload := bootstrapFile{
 		Version:       bootstrapVersion,
 		Enabled:       value.Enabled,

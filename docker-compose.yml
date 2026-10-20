@@ -98,13 +98,23 @@ services:
       # 带认证 socks5 必须走本地转发，填上游 URL 即可（入口会自动指向转发口）
       RELAY_UPSTREAM: "${RELAY_UPSTREAM:-}"
       REGISTRAR_PROXY: "${REGISTRAR_PROXY:-}"
+      # 邮件服务凭据（镜像内不存任何密钥）
+      REGISTRAR_EMAIL_PROVIDER: "${REGISTRAR_EMAIL_PROVIDER:-cloudflare}"
+      REGISTRAR_CLOUDFLARE_API_BASE: "${REGISTRAR_CLOUDFLARE_API_BASE:-}"
+      REGISTRAR_CLOUDFLARE_API_KEY: "${REGISTRAR_CLOUDFLARE_API_KEY:-}"
+      REGISTRAR_CLOUDFLARE_AUTH_MODE: "${REGISTRAR_CLOUDFLARE_AUTH_MODE:-x-admin-auth}"
+      # 可选：显式内部令牌。留空则读共享卷里的 bootstrap.json（compose 默认）。
+      REGISTRAR_INTERNAL_TOKEN: "${REGISTRAR_TOKEN:-}"
       TZ: "${TZ:-Asia/Shanghai}"
     volumes:
-      # 注册机本体（含 config.json / accounts/）挂进来，镜像内不含注册机源码
+      # 本机可用宿主机目录覆盖镜像内置注册机；留空则不覆盖，直接用镜像内源码
       - "${REGISTRAR_APP_PATH:-./registrar-app}:/opt/registrar-app"
       - registrar_out:/out
       # 与主程序共享：主程序写入 bootstrap.json（含内部令牌），sidecar 读取
       - registrar_state:/var/lib/grok2api-account-registrar
+    depends_on:
+      grok2api:
+        condition: service_healthy
     shm_size: "1gb"
     restart: unless-stopped
     init: true
