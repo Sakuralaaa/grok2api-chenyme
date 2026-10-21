@@ -336,12 +336,33 @@ func (a *Adapter) doDPoPRequestWithContentType(
 		if strings.HasSuffix(request.URL.Path, "/responses") {
 			request.Header.Set("x-cluster", "https://us-east-1.api.x.ai")
 		}
+		needsAPIKey := consoleRequiresAPIKey(request.URL.Path)
+		if needsAPIKey {
+			apiKeyID, keyErr := a.ensureConsoleAPIKey(ctx, credential, ssoToken, lease)
+			if keyErr != nil {
+				return nil, fmt.Errorf("获取 Console Playground API Key: %w", keyErr)
+			}
+			request.Header.Set("x-apikey", apiKeyID)
+		}
 		if err := applyDPoPAuthorization(request, session); err != nil {
 			return nil, err
 		}
 		response, err := lease.DoDeferredForbidden(request)
 		if err != nil {
 			return nil, err
+		}
+		if needsAPIKey && (response.StatusCode == http.StatusBadRequest || response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) {
+			data, readErr := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+			_ = response.Body.Close()
+			if readErr != nil {
+				return nil, readErr
+			}
+			if attempt == 0 && isConsoleAPIKeyRejectedBody(response.StatusCode, data) {
+				a.invalidateConsoleAPIKey(credential, ssoToken)
+				continue
+			}
+			response.Body = io.NopCloser(bytes.NewReader(data))
+			response.ContentLength = int64(len(data))
 		}
 		if response.StatusCode != http.StatusUnauthorized || attempt > 0 {
 			return response, nil
