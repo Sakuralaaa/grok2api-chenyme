@@ -81,6 +81,14 @@ func (a *Adapter) DialVoiceWebSocket(ctx context.Context, request provider.Voice
 		httpReq.Header.Set("Sec-Fetch-Site", "same-origin")
 		httpReq.Header.Set("Cache-Control", "no-cache")
 		httpReq.Header.Set("Pragma", "no-cache")
+		if consoleAPIKeyEnabled {
+			apiKeyID, keyErr := a.ensureConsoleAPIKey(requestCtx, request.Credential, token, lease)
+			if keyErr != nil {
+				cleanup()
+				return nil, nil, fmt.Errorf("获取 Console Playground API Key: %w", keyErr)
+			}
+			httpReq.Header.Set("x-apikey", apiKeyID)
+		}
 		if requestErr := applyDPoPAuthorization(httpReq, session); requestErr != nil {
 			cleanup()
 			return nil, nil, requestErr
