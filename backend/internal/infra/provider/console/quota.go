@@ -106,6 +106,19 @@ func (a *Adapter) syncConsoleQuotas(ctx context.Context, credential account.Cred
 		if quota.Limit < 0 || quota.Used < 0 || quota.Remaining < 0 || quota.Remaining > quota.Limit {
 			return nil, time.Time{}, fmt.Errorf("Console %s 额度响应无效", consoleQuotaKind(mode))
 		}
+		if quota.Limit == 0 {
+			// The keyless free Playground quota was retired upstream: /v1/usage
+			// now reports limit 0 for every kind, while calls made with the
+			// team's Playground API key (x-apikey) are billed against the team's
+			// credits instead. Do not record a fake exhausted window (that would
+			// mark the account exhausted); keep an estimated placeholder so the
+			// router treats capacity as unknown and upstream errors decide.
+			byMode[mode] = account.QuotaWindow{
+				AccountID: credential.ID, Mode: mode, Remaining: 1, Total: 1,
+				SyncedAt: &now, Source: account.QuotaSourceEstimated, UpdatedAt: now,
+			}
+			continue
+		}
 		usagePercent := 0.0
 		if quota.Limit > 0 {
 			usagePercent = float64(quota.Limit-quota.Remaining) / float64(quota.Limit) * 100
