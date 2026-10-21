@@ -3,400 +3,344 @@ package console
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
+	"regexp"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"golang.org/x/sync/singleflight"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
-// Console Playground no longer has a keyless free quota: requests without an
-// API key are rejected with "Free usage quota exceeded ... provision an API
-// key". The official playground (console.x.ai/team/<id>/chat) resolves the
-// personal team via gRPC-web AuthManagement/ListTeams, reuses or creates a
-// team API key ("xAI Chat Playground", acls api-key:endpoint:* +
-// api-key:model:*) and sends its ID as the x-apikey header next to DPoP.
-
+// Free Console accounts must send the team's apiKeyId as x-apikey on every
+// /v1 inference request; without it the upstream answers 429 "provision an API
+// key". The key is read from the Console home page SSR payload and created
+// only when the team has none, because CreateApiKey has no idempotency guard.
 const (
-	consolePlaygroundKeyName = "xAI Chat Playground"
-	consoleAPIKeyTTL         = 6 * time.Hour
-	authMgmtService          = "auth_mgmt.AuthManagement"
+	consoleAPIKeyHeader       = "x-apikey"
+	consoleAPIKeyName         = "xAI Chat Playground"
+	consoleCreateAPIKeyPath   = "/auth_mgmt.AuthManagement/CreateApiKey"
+	consoleHomeBodyLimit      = 8 << 20
+	consoleAPIKeyCacheLimit   = 8192
+	consoleAPIKeyACLEndpoint  = "api-key:endpoint:*"
+	consoleAPIKeyACLModel     = "api-key:model:*"
+	consoleAPIKeyScanDistance = 4096
+	consoleHomeMaxRedirects   = 3
 )
 
-var consolePlaygroundKeyACLs = []string{"api-key:endpoint:*", "api-key:model:*"}
+var (
+	errConsoleAPIKeyUnavailable = errors.New("Console 首页未提供可用的 apiKeyId")
+	consoleAPIKeyIDPattern      = regexp.MustCompile(`"apiKeyId"\s*:\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"`)
+	consoleDisabledPattern      = regexp.MustCompile(`"disabled"\s*:\s*true`)
+	consoleTeamPathPattern      = regexp.MustCompile(`/team/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})`)
+	consoleTeamIDPattern        = regexp.MustCompile(`"teamId"\s*:\s*"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"`)
+)
 
-type consoleAPIKeyEntry struct {
-	teamID    string
-	apiKeyID  string
-	expiresAt time.Time
+// CredentialCacheStore persists Console-only acceleration caches. Both values
+// are recoverable from the SSO alone, so write failures never fail a request.
+type CredentialCacheStore interface {
+	UpdateConsoleAPIKeyID(ctx context.Context, accountID uint64, apiKeyID string) error
+	UpdateConsoleWorkOSSession(ctx context.Context, accountID uint64, encryptedSession string) error
 }
 
+// consoleAPIKeyCache keeps resolved keys between the persistent write and the
+// next candidate snapshot reload. Entries are keyed by account and SSO hash so
+// a replaced SSO can never reuse another team's key.
 type consoleAPIKeyCache struct {
-	mu      sync.Mutex
-	entries map[string]consoleAPIKeyEntry
-	locks   map[string]*sync.Mutex
+	mu     sync.Mutex
+	values map[string]string
+	loads  singleflight.Group
 }
 
 func newConsoleAPIKeyCache() *consoleAPIKeyCache {
-	return &consoleAPIKeyCache{entries: map[string]consoleAPIKeyEntry{}, locks: map[string]*sync.Mutex{}}
+	return &consoleAPIKeyCache{values: make(map[string]string)}
 }
 
 func consoleAPIKeyCacheKey(credential account.Credential, ssoToken string) string {
-	return strconv.FormatUint(credential.ID, 10) + "|" + security.HashToken(ssoToken)
+	return fmt.Sprintf("%d|%s", credential.ID, security.HashToken(ssoToken))
 }
 
-func (c *consoleAPIKeyCache) lock(key string) *sync.Mutex {
+func (c *consoleAPIKeyCache) get(key string) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	l, ok := c.locks[key]
-	if !ok {
-		l = &sync.Mutex{}
-		c.locks[key] = l
-	}
-	return l
+	return c.values[key]
 }
 
-func (c *consoleAPIKeyCache) get(key string) (consoleAPIKeyEntry, bool) {
+func (c *consoleAPIKeyCache) set(key, value string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	entry, ok := c.entries[key]
-	if !ok || time.Now().After(entry.expiresAt) {
-		return consoleAPIKeyEntry{}, false
+	if len(c.values) >= consoleAPIKeyCacheLimit {
+		for existing := range c.values {
+			delete(c.values, existing)
+			break
+		}
 	}
-	return entry, true
+	c.values[key] = value
 }
 
-func (c *consoleAPIKeyCache) put(key string, entry consoleAPIKeyEntry) {
+func (c *consoleAPIKeyCache) invalidate(key, value string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	entry.expiresAt = time.Now().Add(consoleAPIKeyTTL)
-	c.entries[key] = entry
+	if current, ok := c.values[key]; ok && (value == "" || current == value) {
+		delete(c.values, key)
+	}
 }
 
-func (c *consoleAPIKeyCache) invalidate(key string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.entries, key)
-}
-
-var globalConsoleAPIKeys = newConsoleAPIKeyCache()
-
-// consoleAPIKeyEnabled lets unit tests that fake only /v1 endpoints opt out.
-var consoleAPIKeyEnabled = true
-
-// consoleRequiresAPIKey reports whether a Console /v1 request must carry the
-// playground x-apikey header (everything except DPoP minting and /usage).
-func consoleRequiresAPIKey(path string) bool {
-	if !consoleAPIKeyEnabled {
-		return false
+// consoleAPIKey returns the x-apikey for the credential. refresh skips both
+// the persisted value and the process cache, used after the upstream rejected
+// the cached key.
+func (a *Adapter) consoleAPIKey(ctx context.Context, credential account.Credential, ssoToken string, lease *infraegress.Lease, refresh bool) (string, error) {
+	key := consoleAPIKeyCacheKey(credential, ssoToken)
+	if !refresh {
+		if value := a.apiKeys.get(key); value != "" {
+			return value, nil
+		}
+		if value := strings.TrimSpace(credential.ConsoleAPIKeyID); value != "" {
+			return value, nil
+		}
 	}
-	path = strings.TrimRight(path, "/")
-	idx := strings.Index(path, "/v1/")
-	if idx < 0 {
-		return false
-	}
-	rest := path[idx+len("/v1"):]
-	return !strings.HasPrefix(rest, "/dpop/") && rest != "/usage"
-}
-
-// isConsoleAPIKeyRejectedBody detects responses that mean the cached key ID is
-// no longer valid (deleted, disabled, propagated away) so it can be refreshed.
-func isConsoleAPIKeyRejectedBody(status int, body []byte) bool {
-	if status != http.StatusUnauthorized && status != http.StatusForbidden && status != http.StatusBadRequest {
-		return false
-	}
-	lower := strings.ToLower(string(body))
-	if strings.Contains(lower, "credits") || strings.Contains(lower, "spending") {
-		return false
-	}
-	return strings.Contains(lower, "api key") || strings.Contains(lower, "api-key") || strings.Contains(lower, "apikey")
-}
-
-func (a *Adapter) ensureConsoleAPIKey(ctx context.Context, credential account.Credential, ssoToken string, lease *infraegress.Lease) (string, error) {
-	cacheKey := consoleAPIKeyCacheKey(credential, ssoToken)
-	if entry, ok := globalConsoleAPIKeys.get(cacheKey); ok {
-		return entry.apiKeyID, nil
-	}
-	l := globalConsoleAPIKeys.lock(cacheKey)
-	l.Lock()
-	defer l.Unlock()
-	if entry, ok := globalConsoleAPIKeys.get(cacheKey); ok {
-		return entry.apiKeyID, nil
-	}
-	teamID, err := a.consoleTeamID(ctx, credential, ssoToken, lease)
+	// Coalesce concurrent resolutions per account: two parallel misses must not
+	// both reach CreateApiKey and leave a stray key on the team.
+	value, err, _ := a.apiKeys.loads.Do(key, func() (any, error) {
+		if !refresh {
+			if cached := a.apiKeys.get(key); cached != "" {
+				return cached, nil
+			}
+		}
+		resolved, resolveErr := a.resolveConsoleAPIKey(ctx, credential, ssoToken, lease)
+		if resolveErr != nil {
+			return "", resolveErr
+		}
+		a.apiKeys.set(key, resolved)
+		if resolved != strings.TrimSpace(credential.ConsoleAPIKeyID) {
+			a.saveConsoleAPIKeyID(ctx, credential.ID, resolved)
+		}
+		return resolved, nil
+	})
 	if err != nil {
 		return "", err
 	}
-	keyID, err := a.findConsolePlaygroundKey(ctx, credential, ssoToken, lease, teamID)
+	resolved, _ := value.(string)
+	if resolved == "" {
+		return "", errConsoleAPIKeyUnavailable
+	}
+	return resolved, nil
+}
+
+func (a *Adapter) invalidateConsoleAPIKey(credential account.Credential, ssoToken, value string) {
+	a.apiKeys.invalidate(consoleAPIKeyCacheKey(credential, ssoToken), value)
+}
+
+func (a *Adapter) saveConsoleAPIKeyID(ctx context.Context, accountID uint64, apiKeyID string) {
+	store := a.cacheStore()
+	if store == nil || accountID == 0 {
+		return
+	}
+	if err := store.UpdateConsoleAPIKeyID(context.WithoutCancel(ctx), accountID, apiKeyID); err != nil {
+		a.logger().Warn("console_api_key_cache_write_failed", "account_id", accountID, "error", err)
+	}
+}
+
+// resolveConsoleAPIKey is the read-then-create sequence: reuse any enabled
+// team key from the Console home page and create one only when none exists.
+func (a *Adapter) resolveConsoleAPIKey(ctx context.Context, credential account.Credential, ssoToken string, lease *infraegress.Lease) (string, error) {
+	home, err := a.readConsoleHome(ctx, ssoToken, lease)
 	if err != nil {
 		return "", err
 	}
-	if keyID == "" {
-		keyID, err = a.createConsolePlaygroundKey(ctx, credential, ssoToken, lease, teamID)
+	if keyID := home.apiKeyID; keyID != "" {
+		return keyID, nil
+	}
+	if home.teamID == "" {
+		return "", fmt.Errorf("%w: 缺少 teamId", errConsoleAPIKeyUnavailable)
+	}
+	if err := a.createConsoleAPIKey(ctx, credential, ssoToken, lease, home.teamID); err != nil {
+		return "", err
+	}
+	// The create response carries the secret key body, not its id. Re-read the
+	// home page so only the stable apiKeyId is ever used and stored.
+	confirmed, err := a.readConsoleHome(ctx, ssoToken, lease)
+	if err != nil {
+		return "", err
+	}
+	if confirmed.apiKeyID == "" {
+		return "", fmt.Errorf("%w: 创建后回读未找到", errConsoleAPIKeyUnavailable)
+	}
+	return confirmed.apiKeyID, nil
+}
+
+type consoleHome struct {
+	apiKeyID string
+	teamID   string
+}
+
+// readConsoleHome loads the Console landing page, which 307-redirects to
+// /team/<teamId>. Only same-origin hops are followed; the team id is taken
+// from the final path because it is authoritative for the SSO's team.
+func (a *Adapter) readConsoleHome(ctx context.Context, ssoToken string, lease *infraegress.Lease) (consoleHome, error) {
+	origin := consoleOrigin(a.config().BaseURL)
+	current, err := url.Parse(origin + "/")
+	if err != nil {
+		return consoleHome{}, err
+	}
+	extraCookies := map[string]string{}
+	for hop := 0; hop <= consoleHomeMaxRedirects; hop++ {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, current.String(), nil)
 		if err != nil {
-			return "", err
+			return consoleHome{}, err
 		}
-	}
-	globalConsoleAPIKeys.put(cacheKey, consoleAPIKeyEntry{teamID: teamID, apiKeyID: keyID})
-	return keyID, nil
-}
-
-func (a *Adapter) invalidateConsoleAPIKey(credential account.Credential, ssoToken string) {
-	globalConsoleAPIKeys.invalidate(consoleAPIKeyCacheKey(credential, ssoToken))
-}
-
-func (a *Adapter) consoleTeamID(ctx context.Context, credential account.Credential, ssoToken string, lease *infraegress.Lease) (string, error) {
-	data, err := a.consoleGRPC(ctx, credential, ssoToken, lease, authMgmtService, "ListTeams", nil)
-	if err != nil {
-		return "", err
-	}
-	var fallback string
-	for _, team := range pbRepeatedBytes(data, 1) {
-		teamID := pbString(team, 1)
-		if teamID == "" {
+		applyBrowserHeaders(request, ssoToken, lease)
+		request.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+		request.Header.Set("Sec-Fetch-Dest", "document")
+		request.Header.Set("Sec-Fetch-Mode", "navigate")
+		request.Header.Set("Sec-Fetch-Site", "none")
+		request.Header.Del("Origin")
+		request.Header.Del("Referer")
+		if len(extraCookies) > 0 {
+			parts := make([]string, 0, len(extraCookies))
+			for name, value := range extraCookies {
+				parts = append(parts, name+"="+value)
+			}
+			request.Header.Set("Cookie", joinCookieHeaders(request.Header.Get("Cookie"), strings.Join(parts, "; ")))
+		}
+		response, err := lease.DoDeferredForbidden(request)
+		if err != nil {
+			return consoleHome{}, err
+		}
+		if response.StatusCode >= 300 && response.StatusCode < 400 {
+			location := response.Header.Get("Location")
+			for _, cookie := range response.Cookies() {
+				if cookie.Name != "sso" && cookie.Name != "sso-rw" {
+					extraCookies[cookie.Name] = cookie.Value
+				}
+			}
+			_, _, _ = provider.ReadDiagnosticBody(response.Body)
+			_ = response.Body.Close()
+			next, err := current.Parse(location)
+			if location == "" || err != nil || !strings.EqualFold(next.Host, current.Host) {
+				return consoleHome{}, fmt.Errorf("Console 首页跳转到非同源地址（status %d）", response.StatusCode)
+			}
+			current = next
 			continue
 		}
-		if fallback == "" {
-			fallback = teamID
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			data, _, _ := provider.ReadDiagnosticBody(response.Body)
+			_ = response.Body.Close()
+			if response.StatusCode == http.StatusForbidden && shouldInvalidateConsoleClearance(data) {
+				lease.InvalidateClearance()
+			}
+			if response.StatusCode == http.StatusUnauthorized {
+				return consoleHome{}, fmt.Errorf("%w: Console 首页返回 401", provider.ErrUnauthorized)
+			}
+			return consoleHome{}, fmt.Errorf("Console 首页返回 %d", response.StatusCode)
 		}
-		if strings.Contains(strings.ToLower(pbString(team, 6)), "personal team") {
-			return teamID, nil
+		data, err := io.ReadAll(io.LimitReader(response.Body, consoleHomeBodyLimit))
+		_ = response.Body.Close()
+		if err != nil {
+			return consoleHome{}, err
 		}
+		home := parseConsoleHome(data)
+		if match := consoleTeamPathPattern.FindStringSubmatch(current.Path); match != nil {
+			home.teamID = strings.ToLower(match[1])
+		}
+		return home, nil
 	}
-	if fallback == "" {
-		return "", errors.New("Console 账号没有可用团队")
-	}
-	return fallback, nil
+	return consoleHome{}, fmt.Errorf("Console 首页跳转次数超过 %d", consoleHomeMaxRedirects)
 }
 
-func (a *Adapter) findConsolePlaygroundKey(ctx context.Context, credential account.Credential, ssoToken string, lease *infraegress.Lease, teamID string) (string, error) {
-	request := pbAppendString(nil, 2, teamID)
-	request = pbAppendBool(request, 7, true)
-	data, err := a.consoleGRPC(ctx, credential, ssoToken, lease, authMgmtService, "ListApiKeys", request)
-	if err != nil {
-		return "", err
-	}
-	var anyMatch string
-	for _, key := range pbRepeatedBytes(data, 1) {
-		if pbBool(key, 15) {
+// parseConsoleHome extracts the first enabled apiKeyId and the team id from
+// the Next.js SSR payload. The payload embeds JSON as escaped string literals
+// (\"apiKeyId\":\"…\", sometimes escaped twice); UUIDs never contain
+// backslashes, so dropping them yields plain JSON fragments to scan.
+func parseConsoleHome(data []byte) consoleHome {
+	text := string(bytes.ReplaceAll(data, []byte(`\`), nil))
+	result := consoleHome{}
+	matches := consoleAPIKeyIDPattern.FindAllStringSubmatchIndex(text, -1)
+	for index, match := range matches {
+		end := len(text)
+		if index+1 < len(matches) {
+			end = matches[index+1][0]
+		}
+		if end-match[1] > consoleAPIKeyScanDistance {
+			end = match[1] + consoleAPIKeyScanDistance
+		}
+		// Console serializes disabled after apiKeyId in each key object, so the
+		// span up to the next key belongs to this key.
+		if consoleDisabledPattern.MatchString(text[match[1]:end]) {
 			continue
 		}
-		keyID := pbString(key, 8)
-		if keyID == "" || !consoleKeyACLsCoverPlayground(pbRepeatedStrings(key, 16)) {
-			continue
-		}
-		if pbString(key, 4) == consolePlaygroundKeyName {
-			return keyID, nil
-		}
-		if anyMatch == "" {
-			anyMatch = keyID
-		}
+		result.apiKeyID = strings.ToLower(text[match[2]:match[3]])
+		break
 	}
-	return anyMatch, nil
+	if match := consoleTeamIDPattern.FindStringSubmatch(text); match != nil {
+		result.teamID = strings.ToLower(match[1])
+	} else if match := consoleTeamPathPattern.FindStringSubmatch(text); match != nil {
+		result.teamID = strings.ToLower(match[1])
+	}
+	return result
 }
 
-func consoleKeyACLsCoverPlayground(acls []string) bool {
-	endpoint, model := false, false
-	for _, acl := range acls {
-		switch acl {
-		case "api-key:endpoint:*":
-			endpoint = true
-		case "api-key:model:*":
-			model = true
-		}
-	}
-	return endpoint && model
-}
-
-func (a *Adapter) createConsolePlaygroundKey(ctx context.Context, credential account.Credential, ssoToken string, lease *infraegress.Lease, teamID string) (string, error) {
-	request := pbAppendString(nil, 1, consolePlaygroundKeyName)
-	request = pbAppendString(request, 2, teamID)
-	for _, acl := range consolePlaygroundKeyACLs {
-		request = pbAppendString(request, 3, acl)
-	}
-	data, err := a.consoleGRPC(ctx, credential, ssoToken, lease, authMgmtService, "CreateApiKey", request)
+func (a *Adapter) createConsoleAPIKey(ctx context.Context, credential account.Credential, ssoToken string, lease *infraegress.Lease, teamID string) error {
+	endpoint := consoleOrigin(a.config().BaseURL) + consoleCreateAPIKeyPath
+	response, err := a.doDPoPRequestWithOptions(ctx, credential, ssoToken, lease, http.MethodPost, endpoint, consoleCreateAPIKeyBody(teamID), dpopRequestOptions{
+		contentType: "application/connect+proto",
+		accept:      "*/*",
+		referer:     consoleOrigin(a.config().BaseURL) + "/team/" + url.PathEscape(teamID) + "/chat",
+		skipAPIKey:  true,
+	})
 	if err != nil {
-		return "", err
+		return err
 	}
-	keyID := pbString(data, 8)
-	if keyID == "" {
-		return "", errors.New("Console 创建 Playground API Key 未返回 ID")
+	data, _, _ := provider.ReadDiagnosticBody(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if response.StatusCode == http.StatusForbidden && shouldInvalidateConsoleClearance(data) {
+			lease.InvalidateClearance()
+		}
+		return fmt.Errorf("Console CreateApiKey 返回 %d", response.StatusCode)
 	}
-	return keyID, nil
+	a.logger().Info("console_api_key_created", "account_id", credential.ID)
+	return nil
+}
+
+// consoleCreateAPIKeyBody builds the Connect envelope (flag byte + big-endian
+// length) around CreateApiKeyRequest{name=1, team_id=2, acls=3...}.
+func consoleCreateAPIKeyBody(teamID string) []byte {
+	var payload []byte
+	payload = protowire.AppendTag(payload, 1, protowire.BytesType)
+	payload = protowire.AppendString(payload, consoleAPIKeyName)
+	payload = protowire.AppendTag(payload, 2, protowire.BytesType)
+	payload = protowire.AppendString(payload, teamID)
+	for _, acl := range []string{consoleAPIKeyACLEndpoint, consoleAPIKeyACLModel} {
+		payload = protowire.AppendTag(payload, 3, protowire.BytesType)
+		payload = protowire.AppendString(payload, acl)
+	}
+	envelope := make([]byte, 5, 5+len(payload))
+	length := len(payload)
+	envelope[1], envelope[2], envelope[3], envelope[4] = byte(length>>24), byte(length>>16), byte(length>>8), byte(length)
+	return append(envelope, payload...)
+}
+
+// isConsoleMissingAPIKeyBody reports the 429 Console returns when x-apikey is
+// absent or no longer belongs to the team. It is repairable, not a rate limit.
+func isConsoleMissingAPIKeyBody(body []byte) bool {
+	text := strings.ToLower(string(body))
+	return strings.Contains(text, "provision an api key") || strings.Contains(text, "not the owner")
 }
 
 func consoleOrigin(baseURL string) string {
-	parsed, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil || parsed.Host == "" {
-		return "https://console.x.ai"
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	baseURL = strings.TrimSuffix(baseURL, "/v1")
+	if parsed, err := url.Parse(baseURL); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		return parsed.Scheme + "://" + parsed.Host
 	}
-	return parsed.Scheme + "://" + parsed.Host
-}
-
-// consoleGRPC performs a unary gRPC-web (binary protobuf) call authenticated
-// with the account's DPoP session, returning the raw response message bytes.
-func (a *Adapter) consoleGRPC(ctx context.Context, credential account.Credential, ssoToken string, lease *infraegress.Lease, service, method string, message []byte) ([]byte, error) {
-	frame := make([]byte, 5, 5+len(message))
-	binary.BigEndian.PutUint32(frame[1:], uint32(len(message)))
-	frame = append(frame, message...)
-	endpoint := consoleOrigin(a.config().BaseURL) + "/" + service + "/" + method
-	response, err := a.doDPoPRequestWithContentType(ctx, credential, ssoToken, lease, http.MethodPost, endpoint, frame, "application/grpc-web+proto", "application/grpc-web+proto")
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
-	if err != nil {
-		return nil, err
-	}
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Console %s HTTP %d", method, response.StatusCode)
-	}
-	if status := response.Header.Get("grpc-status"); status != "" && status != "0" {
-		msg, _ := url.QueryUnescape(response.Header.Get("grpc-message"))
-		return nil, fmt.Errorf("Console %s grpc-status %s: %s", method, status, msg)
-	}
-	var out []byte
-	for len(body) >= 5 {
-		flag := body[0]
-		length := int(binary.BigEndian.Uint32(body[1:5]))
-		if 5+length > len(body) {
-			break
-		}
-		chunk := body[5 : 5+length]
-		body = body[5+length:]
-		if flag&0x80 != 0 {
-			trailer := string(chunk)
-			if idx := strings.Index(trailer, "grpc-status:"); idx >= 0 {
-				status := strings.TrimSpace(strings.SplitN(trailer[idx+len("grpc-status:"):], "\r\n", 2)[0])
-				if status != "0" {
-					return nil, fmt.Errorf("Console %s grpc-status %s: %s", method, status, strings.TrimSpace(trailer))
-				}
-			}
-			continue
-		}
-		out = append(out, chunk...)
-	}
-	return out, nil
-}
-
-// --- minimal protobuf wire helpers (strings, bools, nested messages) ---
-
-func pbAppendVarint(buf []byte, v uint64) []byte {
-	for v >= 0x80 {
-		buf = append(buf, byte(v)|0x80)
-		v >>= 7
-	}
-	return append(buf, byte(v))
-}
-
-func pbAppendString(buf []byte, field int, value string) []byte {
-	buf = pbAppendVarint(buf, uint64(field<<3|2))
-	buf = pbAppendVarint(buf, uint64(len(value)))
-	return append(buf, value...)
-}
-
-func pbAppendBool(buf []byte, field int, value bool) []byte {
-	if !value {
-		return buf
-	}
-	buf = pbAppendVarint(buf, uint64(field<<3))
-	return append(buf, 1)
-}
-
-func pbReadVarint(buf []byte) (uint64, int) {
-	var v uint64
-	for i := 0; i < len(buf) && i < 10; i++ {
-		v |= uint64(buf[i]&0x7f) << (7 * i)
-		if buf[i] < 0x80 {
-			return v, i + 1
-		}
-	}
-	return 0, 0
-}
-
-// pbFields walks a message and calls fn for each field (bytes for wire type 2,
-// varint value otherwise). Malformed input stops the walk.
-func pbFields(buf []byte, fn func(field int, wire int, raw []byte, varint uint64)) {
-	for len(buf) > 0 {
-		tag, n := pbReadVarint(buf)
-		if n == 0 {
-			return
-		}
-		buf = buf[n:]
-		field, wire := int(tag>>3), int(tag&7)
-		switch wire {
-		case 0:
-			v, m := pbReadVarint(buf)
-			if m == 0 {
-				return
-			}
-			fn(field, wire, nil, v)
-			buf = buf[m:]
-		case 1:
-			if len(buf) < 8 {
-				return
-			}
-			buf = buf[8:]
-		case 2:
-			l, m := pbReadVarint(buf)
-			if m == 0 || uint64(len(buf)-m) < l {
-				return
-			}
-			fn(field, wire, buf[m:m+int(l)], 0)
-			buf = buf[m+int(l):]
-		case 5:
-			if len(buf) < 4 {
-				return
-			}
-			buf = buf[4:]
-		default:
-			return
-		}
-	}
-}
-
-func pbRepeatedBytes(buf []byte, field int) [][]byte {
-	var out [][]byte
-	pbFields(buf, func(f, wire int, raw []byte, _ uint64) {
-		if f == field && wire == 2 {
-			out = append(out, bytes.Clone(raw))
-		}
-	})
-	return out
-}
-
-func pbRepeatedStrings(buf []byte, field int) []string {
-	var out []string
-	for _, raw := range pbRepeatedBytes(buf, field) {
-		out = append(out, string(raw))
-	}
-	return out
-}
-
-func pbString(buf []byte, field int) string {
-	values := pbRepeatedStrings(buf, field)
-	if len(values) == 0 {
-		return ""
-	}
-	return values[len(values)-1]
-}
-
-func pbBool(buf []byte, field int) bool {
-	var out bool
-	pbFields(buf, func(f, wire int, _ []byte, v uint64) {
-		if f == field && wire == 0 {
-			out = v != 0
-		}
-	})
-	return out
+	return baseURL
 }
