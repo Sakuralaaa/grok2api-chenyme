@@ -1596,9 +1596,9 @@ func (r *AccountRepository) MarkWebNSFWEnabled(ctx context.Context, id uint64, e
 	if id == 0 || enabledAt.IsZero() {
 		return fmt.Errorf("Web NSFW 标记参数无效")
 	}
-	err := r.markWebProfileTimestamp(ctx, id, "nsfw_enabled_at", enabledAt)
+	providerValue, err := r.markWebProfileTimestamp(ctx, id, "nsfw_enabled_at", enabledAt)
 	if err == nil {
-		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged, Provider: account.ProviderWeb, AccountID: id})
+		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged, Provider: providerValue, AccountID: id})
 	}
 	return err
 }
@@ -1610,13 +1610,16 @@ func (r *AccountRepository) MarkWebTermsAccepted(ctx context.Context, id uint64,
 		return fmt.Errorf("Web 服务协议标记参数无效")
 	}
 	acceptedAt = acceptedAt.UTC()
+	var accountProvider account.Provider
+
 	err := mapError(r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var accountRow accountModel
 		if err := tx.Select("id", "provider").First(&accountRow, id).Error; err != nil {
 			return err
 		}
-		if account.Provider(accountRow.Provider) != account.ProviderWeb {
-			return fmt.Errorf("仅 Grok Web 账号支持资料状态标记")
+		accountProvider = account.Provider(accountRow.Provider)
+		if accountProvider != account.ProviderWeb && accountProvider != account.ProviderConsole {
+			return fmt.Errorf("仅 Grok Web / Console 账号支持资料状态标记")
 		}
 		profile := webAccountProfileModel{
 			AccountID: id, Tier: string(account.WebTierAuto),
@@ -1631,7 +1634,7 @@ func (r *AccountRepository) MarkWebTermsAccepted(ctx context.Context, id uint64,
 			Updates(map[string]any{"terms_accepted_at": acceptedAt, "terms_accepted_version": version}).Error
 	}))
 	if err == nil {
-		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged, Provider: account.ProviderWeb, AccountID: id})
+		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged, Provider: accountProvider, AccountID: id})
 	}
 	return err
 }
@@ -1641,22 +1644,24 @@ func (r *AccountRepository) MarkWebBirthDateSet(ctx context.Context, id uint64, 
 	if id == 0 || setAt.IsZero() {
 		return fmt.Errorf("Web 生日标记参数无效")
 	}
-	err := r.markWebProfileTimestamp(ctx, id, "birth_date_set_at", setAt)
+	providerValue, err := r.markWebProfileTimestamp(ctx, id, "birth_date_set_at", setAt)
 	if err == nil {
-		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged, Provider: account.ProviderWeb, AccountID: id})
+		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountStateChanged, Provider: providerValue, AccountID: id})
 	}
 	return err
 }
 
-func (r *AccountRepository) markWebProfileTimestamp(ctx context.Context, id uint64, column string, value time.Time) error {
+func (r *AccountRepository) markWebProfileTimestamp(ctx context.Context, id uint64, column string, value time.Time) (account.Provider, error) {
 	value = value.UTC()
-	return mapError(r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	var accountProvider account.Provider
+	err := mapError(r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var accountRow accountModel
 		if err := tx.Select("id", "provider").First(&accountRow, id).Error; err != nil {
 			return err
 		}
-		if account.Provider(accountRow.Provider) != account.ProviderWeb {
-			return fmt.Errorf("仅 Grok Web 账号支持资料状态标记")
+		accountProvider = account.Provider(accountRow.Provider)
+		if accountProvider != account.ProviderWeb && accountProvider != account.ProviderConsole {
+			return fmt.Errorf("仅 Grok Web / Console 账号支持资料状态标记")
 		}
 		profile := webAccountProfileModel{AccountID: id, Tier: string(account.WebTierAuto)}
 		switch column {
@@ -1684,6 +1689,7 @@ func (r *AccountRepository) markWebProfileTimestamp(ctx context.Context, id uint
 			return fmt.Errorf("Web 资料状态字段无效")
 		}
 	}))
+	return accountProvider, err
 }
 
 func (r *AccountRepository) UpdateMany(ctx context.Context, providerValue account.Provider, ids []uint64, updates repository.AccountUpdates) (int64, error) {
