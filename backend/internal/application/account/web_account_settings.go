@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"strings"
 	"time"
 
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
@@ -18,6 +19,25 @@ const (
 	webMaximumAge               = 40
 	webAccountStateWriteTimeout = 5 * time.Second
 )
+
+var (
+	webFirstNames = []string{
+		"James", "John", "Robert", "Michael", "William", "David", "Richard", "Joseph",
+		"Thomas", "Charles", "Mary", "Patricia", "Jennifer", "Linda", "Elizabeth",
+		"Ethan", "Noah", "Liam", "Mason", "Lucas", "Owen", "Caleb", "Ryan",
+	}
+	webLastNames = []string{
+		"Smith", "Johnson", "Williams", "Brown", "Jones", "Miller", "Davis", "Wilson",
+		"Brooks", "Turner", "Foster", "Hayes", "Bennett", "Morgan", "Reed", "Cole",
+	}
+)
+
+// webDisplayNameAdapter 是可选能力：读取/设置上游显示名（全名）。
+// 用可选接口而不是扩展 provider 接口，避免所有实现与测试桩都要跟着改。
+type webDisplayNameAdapter interface {
+	DisplayName(ctx context.Context, credential accountdomain.Credential) (string, string, error)
+	SetDisplayName(ctx context.Context, credential accountdomain.Credential, givenName, familyName string) error
+}
 
 // AcceptWebTerms 接受指定 Grok Web SSO 账号的上游服务协议。
 func (s *Service) AcceptWebTerms(ctx context.Context, id uint64) error {
@@ -86,7 +106,7 @@ func (s *Service) runWebAccountScript(ctx context.Context, id uint64, options We
 		return err
 	}
 	options = pendingWebAccountScriptOptions(credential, options)
-	if !options.AcceptTerms && !options.SetBirthDate && !options.EnableNSFW {
+	if !options.AcceptTerms && !options.SetBirthDate && !options.EnableNSFW && !options.SetName {
 		return nil
 	}
 	if options.AcceptTerms {
@@ -96,6 +116,11 @@ func (s *Service) runWebAccountScript(ctx context.Context, id uint64, options We
 			return err
 		}
 		if err := s.recordWebTermsAccepted(ctx, credential.ID); err != nil {
+			return err
+		}
+	}
+	if options.SetName {
+		if err := s.setWebDisplayName(ctx, credential, adapter); err != nil {
 			return err
 		}
 	}
@@ -115,6 +140,52 @@ func (s *Service) runWebAccountScript(ctx context.Context, id uint64, options We
 		}
 	}
 	return nil
+}
+
+func (s *Service) setWebDisplayName(ctx context.Context, credential accountdomain.Credential, adapter provider.WebAccountSettingsAdapter) error {
+	setter, ok := adapter.(webDisplayNameAdapter)
+	if !ok {
+		return fmt.Errorf("%w: 当前 Provider 不支持设置显示名", ErrUnsupported)
+	}
+	return s.runWebAccountSetting(ctx, credential, "设置显示名", func() error {
+		given, _, err := setter.DisplayName(ctx, credential)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(given) != "" {
+			// 上游已经有名字：不覆盖，天然幂等
+			return nil
+		}
+		firstName, lastName, err := randomWebDisplayName(cryptorand.Reader)
+		if err != nil {
+			return err
+		}
+		return setter.SetDisplayName(ctx, credential, firstName, lastName)
+	})
+}
+
+// randomWebDisplayName 随机生成一个常见英文全名。
+func randomWebDisplayName(source io.Reader) (string, string, error) {
+	first, err := pickWebNamePart(source, webFirstNames)
+	if err != nil {
+		return "", "", fmt.Errorf("生成显示名: %w", err)
+	}
+	last, err := pickWebNamePart(source, webLastNames)
+	if err != nil {
+		return "", "", fmt.Errorf("生成显示名: %w", err)
+	}
+	return first, last, nil
+}
+
+func pickWebNamePart(source io.Reader, values []string) (string, error) {
+	if len(values) == 0 {
+		return "", fmt.Errorf("名字候选为空")
+	}
+	index, err := cryptorand.Int(source, big.NewInt(int64(len(values))))
+	if err != nil {
+		return "", err
+	}
+	return values[index.Int64()], nil
 }
 
 func pendingWebAccountScriptOptions(credential accountdomain.Credential, options WebAccountScriptOptions) WebAccountScriptOptions {
@@ -173,8 +244,10 @@ func (s *Service) webAccountSettings(ctx context.Context, id uint64) (accountdom
 	if err != nil {
 		return accountdomain.Credential{}, nil, mapRepositoryError(err)
 	}
-	if credential.Provider != accountdomain.ProviderWeb || credential.AuthType != accountdomain.AuthTypeSSO {
-		return accountdomain.Credential{}, nil, fmt.Errorf("%w: 仅 Grok Web SSO 账号支持该操作", ErrUnsupported)
+	if credential.AuthType != accountdomain.AuthTypeSSO ||
+		(credential.Provider != accountdomain.ProviderWeb &&
+			credential.Provider != accountdomain.ProviderConsole) {
+		return accountdomain.Credential{}, nil, fmt.Errorf("%w: 仅 Grok Web / Console 的 SSO 账号支持该操作", ErrUnsupported)
 	}
 	if s.providers == nil {
 		return accountdomain.Credential{}, nil, fmt.Errorf("Grok Web Provider 未注册")

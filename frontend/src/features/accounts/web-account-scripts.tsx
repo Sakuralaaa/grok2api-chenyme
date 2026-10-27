@@ -1,4 +1,4 @@
-import { Cake, Handshake, VenusAndMars, type LucideIcon } from "lucide-react";
+import { Cake, Handshake, UserRound, VenusAndMars, type LucideIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -20,12 +20,13 @@ const defaultActions: WebAccountScriptActions = {
   acceptTerms: true,
   setBirthDate: true,
   enableNSFW: true,
+  setName: true,
 };
 
 export function WebAccountScriptsDialog({ targets, pending, progress, onClose, onRun }: Props) {
   const { t } = useTranslation();
   const [actions, setActions] = useState<WebAccountScriptActions>(defaultActions);
-  const hasAction = actions.acceptTerms || actions.setBirthDate || actions.enableNSFW;
+  const hasAction = actions.acceptTerms || actions.setBirthDate || actions.enableNSFW || actions.setName;
 
   function updateAction(action: keyof WebAccountScriptActions, checked: boolean): void {
     setActions((current) => {
@@ -51,6 +52,12 @@ export function WebAccountScriptsDialog({ targets, pending, progress, onClose, o
       icon: Handshake,
       label: t("webAccountSettings.acceptTerms"),
       description: t("webAccountScripts.acceptTermsDescription"),
+    },
+    {
+      action: "setName",
+      icon: UserRound,
+      label: t("webAccountSettings.setName"),
+      description: t("webAccountScripts.setNameDescription"),
     },
     {
       action: "setBirthDate",

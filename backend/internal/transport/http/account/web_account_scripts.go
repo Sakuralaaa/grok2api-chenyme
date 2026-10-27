@@ -21,6 +21,7 @@ type webAccountScriptActionsRequest struct {
 	AcceptTerms  bool `json:"acceptTerms"`
 	SetBirthDate bool `json:"setBirthDate"`
 	EnableNSFW   bool `json:"enableNSFW"`
+	SetName      bool `json:"setName"`
 }
 
 func (r webAccountScriptActionsRequest) options() accountapp.WebAccountScriptOptions {
@@ -28,11 +29,12 @@ func (r webAccountScriptActionsRequest) options() accountapp.WebAccountScriptOpt
 		AcceptTerms:  r.AcceptTerms,
 		SetBirthDate: r.SetBirthDate,
 		EnableNSFW:   r.EnableNSFW,
+		SetName:      r.SetName,
 	}
 }
 
 func (r webAccountScriptActionsRequest) empty() bool {
-	return !r.AcceptTerms && !r.SetBirthDate && !r.EnableNSFW
+	return !r.AcceptTerms && !r.SetBirthDate && !r.EnableNSFW && !r.SetName
 }
 
 func (h *Handler) runWebAccountScripts(c *gin.Context) {
@@ -67,7 +69,7 @@ func (h *Handler) runWebAccountScripts(c *gin.Context) {
 			return
 		}
 		ids = uniqueWebAccountScriptIDs(ids)
-		if !h.validateProviderIDs(c, ids, string(accountdomain.ProviderWeb)) {
+		if !h.validateWebOrConsoleIDs(c, ids) {
 			return
 		}
 	}
@@ -89,6 +91,27 @@ func (h *Handler) runWebAccountScripts(c *gin.Context) {
 		return
 	}
 	_ = stream.Write("complete", accountBatchResponse{Succeeded: succeeded, Failed: failed})
+}
+
+// validateWebOrConsoleIDs 允许 Web 与 Console 号池的账号使用账号工具：
+// Console 账号用的是同一份 accounts.x.ai sso，同样能做资料设置。
+func (h *Handler) validateWebOrConsoleIDs(c *gin.Context, ids []uint64) bool {
+	ctx := c.Request.Context()
+	for _, providerValue := range []accountdomain.Provider{
+		accountdomain.ProviderWeb,
+		accountdomain.ProviderConsole,
+	} {
+		valid, err := h.service.AccountsBelongToProvider(ctx, ids, providerValue)
+		if err != nil {
+			h.writeServiceError(c, "accountPoolValidationFailed", err, http.StatusInternalServerError, "校验账号号池失败")
+			return false
+		}
+		if valid {
+			return true
+		}
+	}
+	response.Error(c, http.StatusConflict, "accountPoolMismatch", "批量操作包含不属于 Web/Console 号池的账号")
+	return false
 }
 
 func uniqueWebAccountScriptIDs(ids []uint64) []uint64 {

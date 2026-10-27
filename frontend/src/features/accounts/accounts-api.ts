@@ -390,6 +390,7 @@ export type WebAccountScriptActions = {
   acceptTerms: boolean;
   setBirthDate: boolean;
   enableNSFW: boolean;
+  setName: boolean;
 };
 
 export type WebAccountScriptsInput =

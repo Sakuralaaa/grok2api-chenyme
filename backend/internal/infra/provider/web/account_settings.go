@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -24,6 +25,17 @@ const (
 	webAccountSettingBodyLimit    = 64 << 10
 	webAccountSettingErrorPreview = 240
 	webBirthDateLockedMarker      = "[WKE=account:birth-date-change-limit-reached]"
+
+	// Grok Web 的资料设置不是 REST，而是 Next.js Server Action：
+	//   POST https://grok.com/  + Next-Action 头 + text/plain body
+	// 下面三个 action id 是 2026-10 抓包实测的构建常量，上游重新发版后可能变化；
+	// 失效时的表现是响应体里出现 "error" 字段（不会返回非 2xx）。
+	webServerActionState        = "00fad60341437f6ebf62636b07e6bb0eeeaef04182"
+	webServerActionSetName      = "7f8e273c2dfe9af53c782c9e38214d7ce55d938601"
+	webServerActionSetBirthDate = "7f3c642562b678da31a68ea7746e0b6e58b8fdf190"
+	webNextRouterStateTree      = `["",{"children":["__PAGE__",{},null,null,0]},null,null,16]`
+	webOfficialBaseURL          = "https://grok.com"
+	webDisplayNameMaxLength     = 129
 )
 
 var (
@@ -73,6 +85,131 @@ func (a *Adapter) AcceptTerms(ctx context.Context, credential account.Credential
 			clientHints: true,
 		},
 	)
+}
+
+// DisplayName 读取账号当前的上游显示名（givenName/familyName）。
+// 走 Server Action 的「读资料」动作，body 为空数组。
+func (a *Adapter) DisplayName(ctx context.Context, credential account.Credential) (string, string, error) {
+	baseURL := a.webBaseURL()
+	var body []byte
+	err := a.runWebAccountSetting(ctx, credential, webAccountSettingRequest{
+		endpoint:     baseURL + "/",
+		body:         []byte("[]"),
+		contentType:  "text/plain;charset=UTF-8",
+		origin:       baseURL,
+		referer:      baseURL + "/",
+		serverAction: webServerActionState,
+		captureBody:  &body,
+	})
+	if err != nil {
+		return "", "", err
+	}
+	given, family := webServerActionUserName(body)
+	return given, family, nil
+}
+
+// SetDisplayName 设置上游显示名（全名）。
+// 实测：该动作返回的是「裸 user 对象」（1:{...}），没有 user 包装，
+// 且成功后按 givenName 回读校验最可靠。
+func (a *Adapter) SetDisplayName(ctx context.Context, credential account.Credential, givenName, familyName string) error {
+	givenName = strings.TrimSpace(givenName)
+	familyName = strings.TrimSpace(familyName)
+	if givenName == "" {
+		return fmt.Errorf("显示名的 givenName 不能为空")
+	}
+	if len(givenName)+len(familyName)+1 > webDisplayNameMaxLength {
+		return fmt.Errorf("显示名超过上游长度上限")
+	}
+	payload, err := json.Marshal([]map[string]string{{
+		"givenName":  givenName,
+		"familyName": familyName,
+	}})
+	if err != nil {
+		return err
+	}
+	baseURL := a.webBaseURL()
+	var body []byte
+	err = a.runWebAccountSetting(ctx, credential, webAccountSettingRequest{
+		endpoint:     baseURL + "/",
+		body:         payload,
+		contentType:  "text/plain;charset=UTF-8",
+		origin:       baseURL,
+		referer:      baseURL + "/",
+		serverAction: webServerActionSetName,
+		captureBody:  &body,
+	})
+	if err != nil {
+		return err
+	}
+	gotGiven, _ := webServerActionUserName(body)
+	if gotGiven != givenName {
+		return fmt.Errorf("Grok Web 显示名未生效（上游回显 givenName=%q）", gotGiven)
+	}
+	return nil
+}
+
+func (a *Adapter) webBaseURL() string {
+	baseURL := strings.TrimRight(a.config().BaseURL, "/")
+	if baseURL == "" {
+		return webOfficialBaseURL
+	}
+	return baseURL
+}
+
+// webServerActionUserName 从 Server Action 的 RSC 响应里挖出 givenName/familyName。
+// 两种形态都要认：1:{"user":{...}} 与 1:{...裸 user 字段...}
+func webServerActionUserName(body []byte) (string, string) {
+	type nameFields struct {
+		GivenName  string `json:"givenName"`
+		FamilyName string `json:"familyName"`
+		UserID     string `json:"userId"`
+	}
+	for _, line := range bytes.Split(body, []byte("\n")) {
+		idx := bytes.IndexByte(line, '{')
+		if idx < 0 {
+			continue
+		}
+		var envelope map[string]json.RawMessage
+		if json.NewDecoder(bytes.NewReader(line[idx:])).Decode(&envelope) != nil {
+			continue
+		}
+		if userRaw, ok := envelope["user"]; ok {
+			var fields nameFields
+			if json.Unmarshal(userRaw, &fields) == nil {
+				return fields.GivenName, fields.FamilyName
+			}
+			continue
+		}
+		var fields nameFields
+		if json.Unmarshal(line[idx:], &fields) == nil &&
+			(fields.UserID != "" || fields.GivenName != "" || fields.FamilyName != "") {
+			return fields.GivenName, fields.FamilyName
+		}
+	}
+	return "", ""
+}
+
+// webServerActionError 从 RSC 响应里取出 "error" 字段；没有就返回空。
+// Server Action 的失败是 200 + {"error": "..."}，不会返回非 2xx。
+func webServerActionError(body []byte) string {
+	idx := bytes.Index(body, []byte(`"error"`))
+	if idx < 0 {
+		return ""
+	}
+	start := bytes.LastIndexByte(body[:idx], '{')
+	if start < 0 {
+		return accountSettingPreview(body)
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if json.NewDecoder(bytes.NewReader(body[start:])).Decode(&payload) != nil {
+		return accountSettingPreview(body)
+	}
+	if strings.TrimSpace(payload.Error) == "" {
+		return ""
+	}
+	return payload.Error
 }
 
 // SetBirthDate 设置 Grok Web 账号生日。上游接收 RFC3339 字符串；日期由应用层生成。
@@ -127,6 +264,10 @@ type webAccountSettingRequest struct {
 	statsig     bool
 	clientHints bool
 	withoutCF   bool
+	// serverAction 非空时按 Next.js Server Action 发送（POST grok.com/ + Next-Action 头）。
+	serverAction string
+	// captureBody 非空时把 2xx 响应体回填出来（Server Action 的返回值在这里）。
+	captureBody *[]byte
 }
 
 func (a *Adapter) runWebAccountSetting(ctx context.Context, credential account.Credential, input webAccountSettingRequest) error {
@@ -134,8 +275,13 @@ func (a *Adapter) runWebAccountSetting(ctx context.Context, credential account.C
 }
 
 func (a *Adapter) runWebAccountSettings(ctx context.Context, credential account.Credential, inputs ...webAccountSettingRequest) error {
-	if credential.Provider != account.ProviderWeb || credential.AuthType != account.AuthTypeSSO {
-		return fmt.Errorf("仅 Grok Web SSO 账号支持资料设置")
+	// Console 账号用的也是 accounts.x.ai 的 sso（与 Web 共用同一个令牌），
+	// 所以同样能调 grok.com 的资料设置。Build 是 OAuth，不能。
+	if credential.AuthType != account.AuthTypeSSO {
+		return fmt.Errorf("仅 SSO 账号支持资料设置")
+	}
+	if credential.Provider != account.ProviderWeb && credential.Provider != account.ProviderConsole {
+		return fmt.Errorf("仅 Grok Web / Console 的 SSO 账号支持资料设置")
 	}
 	token, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
 	if err != nil {
@@ -179,6 +325,10 @@ func (a *Adapter) executeWebAccountSetting(ctx context.Context, token string, le
 		if input.connectES {
 			request.Header.Set("x-user-agent", "connect-es/2.1.1")
 		}
+		if input.serverAction != "" {
+			request.Header.Set("Next-Action", input.serverAction)
+			request.Header.Set("Next-Router-State-Tree", url.QueryEscape(webNextRouterStateTree))
+		}
 		if input.statsig {
 			a.applySignedStatsig(requestCtx, request, token, lease)
 		}
@@ -207,6 +357,15 @@ func (a *Adapter) executeWebAccountSetting(ctx context.Context, token string, le
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			return newWebAccountSettingError(response.StatusCode, body)
+		}
+		if input.serverAction != "" {
+			// Server Action 的失败是 200 + {"error": "..."}，必须自己看响应体
+			if message := webServerActionError(body); message != "" {
+				return newWebAccountSettingError(response.StatusCode, []byte(message))
+			}
+			if input.captureBody != nil {
+				*input.captureBody = append([]byte(nil), body...)
+			}
 		}
 		if input.grpcWeb {
 			if err := validateAccountSettingGRPCStatus(response, body); err != nil {
