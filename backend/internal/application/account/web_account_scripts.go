@@ -41,6 +41,11 @@ func (s *Service) RunWebAccountScriptsWithProgress(ctx context.Context, ids []ui
 
 // RunAllWebAccountScriptsWithProgress 分页处理完整 Web 号池，避免一次性加载全部账号。
 func (s *Service) RunAllWebAccountScriptsWithProgress(ctx context.Context, options WebAccountScriptOptions, progress BatchProgressObserver) (int, int, error) {
+	return s.RunProviderAccountScriptsWithProgress(ctx, accountdomain.ProviderWeb, options, progress)
+}
+
+// RunProviderAccountScriptsWithProgress 分页处理指定号池（Web / Console）的全部账号。
+func (s *Service) RunProviderAccountScriptsWithProgress(ctx context.Context, pool accountdomain.Provider, options WebAccountScriptOptions, progress BatchProgressObserver) (int, int, error) {
 	options, err := normalizeWebAccountScriptOptions(options)
 	if err != nil {
 		return 0, 0, err
@@ -54,7 +59,7 @@ func (s *Service) RunAllWebAccountScriptsWithProgress(ctx context.Context, optio
 		started   bool
 	)
 	for {
-		values, count, err := s.accounts.ListProviderAccountBatch(ctx, accountdomain.ProviderWeb, afterID, accountTaskBatchSize)
+		values, count, err := s.accounts.ListProviderAccountBatch(ctx, pool, afterID, accountTaskBatchSize)
 		if err != nil {
 			return succeeded, failed, mapRepositoryError(err)
 		}

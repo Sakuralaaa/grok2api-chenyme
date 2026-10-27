@@ -2,6 +2,7 @@ package account
 
 import (
 	"net/http"
+	"strings"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
@@ -13,6 +14,7 @@ const maxWebAccountScriptRequestIDs = 1000
 
 type webAccountScriptsRequest struct {
 	IDs     []string                       `json:"ids"`
+	Pool    string                         `json:"pool"`
 	All     bool                           `json:"all"`
 	Actions webAccountScriptActionsRequest `json:"actions"`
 }
@@ -59,6 +61,11 @@ func (h *Handler) runWebAccountScripts(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "至少选择一个账号脚本")
 		return
 	}
+	pool, ok := webAccountScriptPool(request.Pool)
+	if !ok {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "号池参数无效")
+		return
+	}
 
 	var ids []uint64
 	if !request.All {
@@ -82,7 +89,7 @@ func (h *Handler) runWebAccountScripts(c *gin.Context) {
 		err       error
 	)
 	if request.All {
-		succeeded, failed, err = h.service.RunAllWebAccountScriptsWithProgress(c.Request.Context(), request.Actions.options(), stream.ProgressObserver())
+		succeeded, failed, err = h.service.RunProviderAccountScriptsWithProgress(c.Request.Context(), pool, request.Actions.options(), stream.ProgressObserver())
 	} else {
 		succeeded, failed, err = h.service.RunWebAccountScriptsWithProgress(c.Request.Context(), ids, request.Actions.options(), stream.ProgressObserver())
 	}
@@ -125,4 +132,16 @@ func uniqueWebAccountScriptIDs(ids []uint64) []uint64 {
 		result = append(result, id)
 	}
 	return result
+}
+
+// webAccountScriptPool 把请求里的号池标识解析成 Provider，缺省按 Web 处理。
+func webAccountScriptPool(value string) (accountdomain.Provider, bool) {
+	switch strings.TrimSpace(value) {
+	case "", string(accountdomain.ProviderWeb):
+		return accountdomain.ProviderWeb, true
+	case string(accountdomain.ProviderConsole):
+		return accountdomain.ProviderConsole, true
+	default:
+		return "", false
+	}
 }

@@ -69,3 +69,21 @@ func TestRunWebAccountScriptsRejectsOversizedSelectionBeforeSSE(t *testing.T) {
 		t.Fatalf("oversized request switched to SSE: %q", contentType)
 	}
 }
+
+func TestRunWebAccountScriptsRejectsUnknownPoolBeforeSSE(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest("POST", "/api/admin/v1/accounts/web/run-scripts",
+		strings.NewReader(`{"all":true,"pool":"grok_build","actions":{"acceptTerms":true}}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	new(Handler).runWebAccountScripts(ctx)
+
+	if recorder.Code != 400 || !strings.Contains(recorder.Body.String(), "号池参数无效") {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if contentType := recorder.Header().Get("Content-Type"); strings.HasPrefix(contentType, "text/event-stream") {
+		t.Fatalf("invalid pool switched to SSE: %q", contentType)
+	}
+}

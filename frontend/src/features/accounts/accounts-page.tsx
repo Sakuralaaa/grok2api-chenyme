@@ -1089,7 +1089,7 @@ export function AccountsPage() {
 
   function runSelectedWebAccountScripts(actions: WebAccountScriptActions): void {
     if (webAccountScriptsTargets === "all") {
-      webAccountScriptsMutation.mutate({ all: true, actions });
+      webAccountScriptsMutation.mutate({ all: true, pool: provider === "grok_console" ? "grok_console" : "grok_web", actions });
     } else if (webAccountScriptsTargets) {
       webAccountScriptsMutation.mutate({ ids: webAccountScriptsTargets, actions });
     }
@@ -1451,7 +1451,7 @@ export function AccountsPage() {
                   setEgressConfigurationOpen(true);
                 }}>{t("accounts.egressConfiguration")}</Button>
                 {provider === "grok_web" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openWebConversion([...selected])}>{t("accountConversion.action")}</Button> : null}
-                {provider === "grok_web" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setWebAccountScriptsTargets([...selected])}>{t("webAccountScripts.action")}</Button> : null}
+                {provider === "grok_web" || provider === "grok_console" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setWebAccountScriptsTargets([...selected])}>{t("webAccountScripts.action")}</Button> : null}
                 {provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openDetectDialog("selected")}>{t("accountCredential.detectAction")}</Button> : null}
                 <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => {
                   if (provider === "grok_build") {
@@ -1468,7 +1468,7 @@ export function AccountsPage() {
               <div className="flex flex-wrap items-center justify-end gap-1.5">
                 <RegistrarAction />
                 {provider === "grok_web" && hasProviderAccounts ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openWebConversion("all")}>{t("accountConversion.action")}</Button> : null}
-                {provider === "grok_web" && hasProviderAccounts ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setWebAccountScriptsTargets("all")}>{t("webAccountScripts.action")}</Button> : null}
+                {(provider === "grok_web" || provider === "grok_console") && hasProviderAccounts ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setWebAccountScriptsTargets("all")}>{t("webAccountScripts.action")}</Button> : null}
                 {hasProviderAccounts && provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openDetectDialog("all")}>{t("accountCredential.detectAction")}</Button> : null}
                 {hasProviderAccounts ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => { setAllQuotaTask("sync"); setSyncAllOpen(true); }}>{t("accountCredential.quotaSyncAction")}</Button> : null}
                 {hasProviderAccounts && provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setRenewAllOpen(true)}>{t("accountCredential.refreshAction")}</Button> : null}
@@ -1534,7 +1534,7 @@ export function AccountsPage() {
                         <DropdownMenuContent align="end">
                           <DropdownMenuItem onClick={() => beginEdit(account)}><Pencil />{t("common.edit")}</DropdownMenuItem>
                           {provider === "grok_web" ? <DropdownMenuItem onClick={() => openWebConversion([account.id])}><ArrowRight />{t("accountConversion.action")}</DropdownMenuItem> : null}
-                          {provider === "grok_web" ? (
+                          {provider === "grok_web" || provider === "grok_console" ? (
                             <WebAccountSettingsMenu
                               account={account}
                               disabled={bulkTaskPending}

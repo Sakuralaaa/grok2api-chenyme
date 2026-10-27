@@ -184,6 +184,34 @@ func TestRunAllWebAccountScriptsOnlyProcessesWebAccounts(t *testing.T) {
 	}
 }
 
+func TestRunProviderAccountScriptsProcessesConsolePool(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, repo, adapter := newWebAccountSettingsTestService(t)
+	webAccount := createWebAccountForScriptTest(t, ctx, repo, "web")
+	consoleAccount, _, err := repo.UpsertByIdentity(ctx, accountdomain.Credential{
+		Provider: accountdomain.ProviderConsole, AuthType: accountdomain.AuthTypeSSO,
+		Name: "console", SourceKey: "console", EncryptedAccessToken: "encrypted", Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	succeeded, failed, err := service.RunProviderAccountScriptsWithProgress(ctx, accountdomain.ProviderConsole, WebAccountScriptOptions{AcceptTerms: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if succeeded != 1 || failed != 0 {
+		t.Fatalf("succeeded=%d failed=%d", succeeded, failed)
+	}
+	if calls := adapter.accountCalls(consoleAccount.ID); !reflect.DeepEqual(calls, []string{"acceptTerms"}) {
+		t.Fatalf("console calls = %#v", calls)
+	}
+	if calls := adapter.accountCalls(webAccount.ID); len(calls) != 0 {
+		t.Fatalf("web calls = %#v", calls)
+	}
+}
+
 func TestRunWebAccountScriptsRejectsEmptyPlan(t *testing.T) {
 	t.Parallel()
 	service, _, _ := newWebAccountSettingsTestService(t)

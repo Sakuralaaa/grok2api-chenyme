@@ -394,7 +394,7 @@ export type WebAccountScriptActions = {
 };
 
 export type WebAccountScriptsInput =
-  | { all: true; ids?: never; actions: WebAccountScriptActions }
+  | { all: true; pool?: "grok_web" | "grok_console"; ids?: never; actions: WebAccountScriptActions }
   | { all?: false; ids: string[]; actions: WebAccountScriptActions };
 
 export type AccountImportResultDTO = {
