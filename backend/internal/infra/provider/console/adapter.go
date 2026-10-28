@@ -43,11 +43,14 @@ type Adapter struct {
 	breaker *egressBreaker
 	store   CredentialCacheStore
 	log     *slog.Logger
+	// searchCaps remembers which account+model pairs have the server-side
+	// search tools gated off upstream; nil disables the check.
+	searchCaps *consoleSearchCapabilityCache
 }
 
 func NewAdapter(cfg Config, egress *infraegress.Manager, cipher *security.Cipher, assets provider.ImageAssetStore) *Adapter {
 	cfg = normalizedConfig(cfg)
-	return &Adapter{cfg: cfg, egress: egress, cipher: cipher, assets: assets, dpop: newDPoPSessionManager(), apiKeys: newConsoleAPIKeyCache(), breaker: newEgressBreaker()}
+	return &Adapter{cfg: cfg, egress: egress, cipher: cipher, assets: assets, dpop: newDPoPSessionManager(), apiKeys: newConsoleAPIKeyCache(), breaker: newEgressBreaker(), searchCaps: newConsoleSearchCapabilityCache()}
 }
 
 func (a *Adapter) SetLogger(logger *slog.Logger) {
@@ -185,12 +188,36 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		cancel()
 		return nil, err
 	}
+	searchRequested := consoleBodyHasSearchTools(body)
+	if searchRequested && !a.consoleSearchCapable(requestCtx, request.Credential, token, lease, spec.UpstreamModel) {
+		lease.Release()
+		cancel()
+		return consoleSearchUnavailableResponse(request.Credential, request.Model), nil
+	}
 	response, err := a.doDPoPRequest(requestCtx, request.Credential, token, lease, http.MethodPost, consoleEndpoint(cfg.BaseURL), body, "*/*")
 	if err != nil {
 		a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, 0, err)
 		lease.Release()
 		cancel()
 		return nil, err
+	}
+	if searchRequested && response.StatusCode == http.StatusBadRequest {
+		data, truncated, readErr := provider.ReadDiagnosticBody(response.Body)
+		_ = response.Body.Close()
+		if readErr != nil {
+			lease.Release()
+			cancel()
+			return nil, readErr
+		}
+		if isConsoleSearchToolsDroppedBody(data) {
+			a.searchCaps.set(request.Credential.ID, spec.UpstreamModel, false, time.Now())
+			a.logger().Warn("console_search_tools_unavailable", "account_id", request.Credential.ID, "model", spec.UpstreamModel)
+			a.egress.FeedbackForScope(context.WithoutCancel(ctx), egressdomain.ScopeConsole, lease.NodeID, response.StatusCode, nil)
+			lease.Release()
+			cancel()
+			return consoleSearchUnavailableResponse(request.Credential, request.Model), nil
+		}
+		restoreResponseBody(response, data, truncated)
 	}
 	if idleCancel != nil && response.StatusCode >= 200 && response.StatusCode < 300 && response.Body != nil {
 		response.Body = providerstreamidle.New(response.Body, time.Duration(cfg.StreamIdleTimeoutSeconds)*time.Second, idleCancel)
