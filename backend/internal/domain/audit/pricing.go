@@ -289,7 +289,7 @@ func EstimateOfficialImageCost(model, resolution, quality string, count int) (Pr
 		if resolution == "" {
 			resolution = "1k"
 		}
-		if quality == "" {
+		if quality == "" || quality == "auto" {
 			quality = "medium"
 		}
 		outputTicks, ok := officialImage20OutputTicks(resolution, quality)
@@ -312,6 +312,8 @@ func EstimateOfficialImageCost(model, resolution, quality string, count int) (Pr
 	switch resolution {
 	case "1k":
 		ticksPerImage = 500_000_000
+	case "1.5k":
+		ticksPerImage = 600_000_000
 	case "2k":
 		ticksPerImage = 700_000_000
 	default:
@@ -344,7 +346,7 @@ func EstimateOfficialImageEditCost(model, resolution, quality string, outputCoun
 		}
 		pricingModel = "grok-imagine-image-edit-" + resolution
 	case "grok-imagine-image-2.0":
-		if quality == "" {
+		if quality == "" || quality == "auto" {
 			quality = "medium"
 		}
 		var ok bool
@@ -368,13 +370,16 @@ func EstimateOfficialImageEditCost(model, resolution, quality string, outputCoun
 	default:
 		return PricingResult{}, false
 	}
-	if resolution != "1k" && resolution != "2k" {
+	if resolution != "1k" && resolution != "2k" && (resolution != "1.5k" || model == "grok-imagine-image" || model == "grok-imagine-image-edit") {
 		return PricingResult{}, false
 	}
 	if outputTicks == 0 {
-		if resolution == "1k" {
+		switch resolution {
+		case "1k":
 			outputTicks = 500_000_000
-		} else {
+		case "1.5k":
+			outputTicks = 600_000_000
+		default:
 			outputTicks = 700_000_000
 		}
 	}
@@ -388,8 +393,12 @@ func officialImage20OutputTicks(resolution, quality string) (int64, bool) {
 	switch resolution + "/" + quality {
 	case "1k/low":
 		return 400_000_000, true
+	case "1.5k/low":
+		return 500_000_000, true
 	case "2k/low", "1k/medium":
 		return 600_000_000, true
+	case "1.5k/medium":
+		return 700_000_000, true
 	case "2k/medium":
 		return 800_000_000, true
 	default:
@@ -432,6 +441,18 @@ func EstimateOfficialVideoCost(model, resolution string, seconds, inputImages in
 		default:
 			return PricingResult{}, false
 		}
+	case "grok-imagine-video-1.5-lite":
+		ticksPerInputImage = officialImageEditInputTicks
+		switch resolution {
+		case "480p":
+			ticksPerSecond = 200_000_000
+		case "720p":
+			ticksPerSecond = 300_000_000
+		case "1080p":
+			ticksPerSecond = 1_400_000_000
+		default:
+			return PricingResult{}, false
+		}
 	}
 	return PricingResult{
 		Model:          baseModel + "-" + resolution,
@@ -458,6 +479,18 @@ func ReconstructOfficialCost(model string, inputTokens, cachedInputTokens, outpu
 		return reconstructImageCost("grok-imagine-image-2.0", "1k", "medium", outputImages)
 	case "grok-imagine-image-2.0-medium-2k":
 		return reconstructImageCost("grok-imagine-image-2.0", "2k", "medium", outputImages)
+	case "grok-imagine-image-2.0-low-1.5k":
+		return reconstructImageCost("grok-imagine-image-2.0", "1.5k", "low", outputImages)
+	case "grok-imagine-image-2.0-medium-1.5k":
+		return reconstructImageCost("grok-imagine-image-2.0", "1.5k", "medium", outputImages)
+	case "grok-imagine-image-quality-1.5k":
+		return reconstructImageCost("grok-imagine-image-quality", "1.5k", "", outputImages)
+	case "grok-imagine-image-2.0-edit-low-1.5k":
+		return reconstructImageEditCost("grok-imagine-image-2.0", "1.5k", "low", inputImages, outputImages)
+	case "grok-imagine-image-2.0-edit-medium-1.5k":
+		return reconstructImageEditCost("grok-imagine-image-2.0", "1.5k", "medium", inputImages, outputImages)
+	case "grok-imagine-image-quality-edit-1.5k":
+		return reconstructImageEditCost("grok-imagine-image-quality", "1.5k", "", inputImages, outputImages)
 	case "grok-imagine-image-quality-1k":
 		return reconstructImageCost("grok-imagine-image-quality", "1k", "", outputImages)
 	case "grok-imagine-image-quality-2k":
@@ -494,6 +527,12 @@ func ReconstructOfficialCost(model string, inputTokens, cachedInputTokens, outpu
 		return reconstructVideoCost("grok-imagine-video-1.5", "720p", inputImages, outputSeconds)
 	case "grok-imagine-video-1.5-1080p":
 		return reconstructVideoCost("grok-imagine-video-1.5", "1080p", inputImages, outputSeconds)
+	case "grok-imagine-video-1.5-lite-480p":
+		return reconstructVideoCost("grok-imagine-video-1.5-lite", "480p", inputImages, outputSeconds)
+	case "grok-imagine-video-1.5-lite-720p":
+		return reconstructVideoCost("grok-imagine-video-1.5-lite", "720p", inputImages, outputSeconds)
+	case "grok-imagine-video-1.5-lite-1080p":
+		return reconstructVideoCost("grok-imagine-video-1.5-lite", "1080p", inputImages, outputSeconds)
 	default:
 		return reconstructTextCost(normalized, inputTokens, cachedInputTokens, outputTokens, contextInputTokens)
 	}
@@ -585,7 +624,7 @@ func reconstructVideoCost(model, resolution string, inputImages, seconds int64) 
 		return PricingBreakdown{}, false
 	}
 	inputTicks := officialLiteImageInputTicks
-	if normalizePricingModel(model) == "grok-imagine-video-1.5" {
+	if base := normalizePricingModel(model); base == "grok-imagine-video-1.5" || base == "grok-imagine-video-1.5-lite" {
 		inputTicks = officialImageEditInputTicks
 	}
 	outputCost := result.CostInUSDTicks - inputImages*inputTicks
@@ -621,6 +660,8 @@ func officialVideoPricingModel(model string) (string, bool) {
 		return "grok-imagine-video", true
 	case "grok-imagine-video-1.5":
 		return "grok-imagine-video-1.5", true
+	case "grok-imagine-video-1.5-lite":
+		return "grok-imagine-video-1.5-lite", true
 	default:
 		return "", false
 	}

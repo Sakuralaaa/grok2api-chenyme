@@ -86,9 +86,9 @@ type ChatSession = {
   messages: ConversationMessage[];
 };
 
-const imageAspectRatios = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"] as const;
-const videoAspectRatios = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"] as const;
-const imageResolutions = ["1k", "2k"] as const;
+const imageAspectRatios = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "21:9", "5:2", "19.5:9", "9:19.5", "20:9", "9:20"] as const;
+const videoAspectRatios = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9", "5:2"] as const;
+const imageResolutions = ["1k", "1.5k", "2k"] as const;
 const videoResolutions = ["480p", "720p", "1080p"] as const;
 const videoDurations = ["6", "10", "15"] as const;
 const videoExtendDurations = ["2", "4", "6", "8", "10"] as const;
@@ -872,7 +872,7 @@ function ImagePanel({ apiKey, model, modelOptions, onModelChange }: CreativePane
   const [count, setCount] = useState("1");
   const [aspectRatio, setAspectRatio] = useState("1:1");
   const [resolution, setResolution] = useState("1k");
-  const [quality, setQuality] = useState<"low" | "medium">("medium");
+  const [quality, setQuality] = useState<"low" | "medium" | "auto">("auto");
   const [images, setImages] = useState<ImageResult[]>([]);
   const supportsQuality = model.toLowerCase().endsWith("grok-imagine-image-2.0");
 
@@ -919,7 +919,7 @@ function ImagePanel({ apiKey, model, modelOptions, onModelChange }: CreativePane
               <CompactSelect value={count} options={["1", "2", "3", "4"]} onChange={setCount} ariaLabel={t("creativeConsole.count")} suffix="×" icon={<Images />} />
               <CompactSelect value={aspectRatio} options={imageAspectRatios} onChange={setAspectRatio} ariaLabel={t("creativeConsole.aspectRatio")} icon={<TvMinimal />} />
               <CompactSelect value={resolution} options={imageResolutions} onChange={setResolution} ariaLabel={t("creativeConsole.resolution")} icon={<ImageUpscale />} />
-              {supportsQuality ? <CompactSelect value={quality} options={["low", "medium"]} onChange={(value) => setQuality(value as "low" | "medium")} ariaLabel={t("creativeConsole.quality")} /> : null}
+              {supportsQuality ? <CompactSelect value={quality} options={["auto", "low", "medium"]} onChange={(value) => setQuality(value as "low" | "medium" | "auto")} ariaLabel={t("creativeConsole.quality")} /> : null}
             </div>
             <Button type="submit" size="icon" aria-label={t("creativeConsole.generateImage")} disabled={!apiKey || !model || !prompt.trim() || mutation.isPending}>{mutation.isPending ? <Loader2 className="animate-spin" /> : <ArrowUp />}</Button>
           </div>

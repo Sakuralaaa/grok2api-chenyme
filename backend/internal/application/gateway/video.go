@@ -245,13 +245,17 @@ func validateVideoRouteParameters(providerValue account.Provider, operation prov
 		if hasImage && hasReferences {
 			return fmt.Errorf("%w: image 与 reference_images 不能同时使用", ErrVideoParameterInvalid)
 		}
-		if referenceCount > provider.ConsoleVideoMaxReferenceImages {
-			return fmt.Errorf("%w: Grok Web reference_images 最多 %d 张，当前为 %d 张", ErrVideoParameterInvalid, provider.ConsoleVideoMaxReferenceImages, referenceCount)
+		if referenceCount > provider.WebVideoMaxReferenceImages {
+			return fmt.Errorf("%w: Grok Web reference_images 最多 %d 张，当前为 %d 张", ErrVideoParameterInvalid, provider.WebVideoMaxReferenceImages, referenceCount)
 		}
 	}
+	if providerValue == account.ProviderConsole && trimmedModel == "grok-imagine-video-1.5-lite" && hasReferences {
+		// 实测 2026-10-29："`reference_images` is not supported for this model."
+		return fmt.Errorf("%w: %s 不支持 reference_images", ErrVideoOperationUnsupported, trimmedModel)
+	}
 	if providerValue == account.ProviderConsole && (trimmedModel == "grok-imagine-video" || trimmedModel == "grok-imagine-video-1.5") {
-		// 实测：8 张 reference_images 上游回 400
-		// "Too many reference images: 8. Maximum allowed is 7."（两个视频模型一致）。
+		// 实测 2026-10-29：15 张 reference_images 上游回 400
+		// "Too many reference images: 15. Maximum allowed is 14."（两个视频模型一致）。
 		if referenceCount > provider.ConsoleVideoMaxReferenceImages {
 			return fmt.Errorf("%w: Console reference_images 最多 %d 张，当前为 %d 张", ErrVideoParameterInvalid, provider.ConsoleVideoMaxReferenceImages, referenceCount)
 		}
@@ -265,7 +269,7 @@ func validateVideoRouteParameters(providerValue account.Provider, operation prov
 	if !strings.EqualFold(strings.TrimSpace(resolution), "1080p") {
 		return nil
 	}
-	if trimmedModel != "grok-imagine-video-1.5" {
+	if trimmedModel != "grok-imagine-video-1.5" && trimmedModel != "grok-imagine-video-1.5-lite" {
 		return fmt.Errorf("%w: %s 不支持 1080p", ErrVideoOperationUnsupported, upstreamModel)
 	}
 	if hasReferences {

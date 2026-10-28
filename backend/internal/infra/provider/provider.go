@@ -558,9 +558,15 @@ const (
 // They are shared by admission control and the Console adapter so invalid
 // asynchronous jobs are rejected before enqueueing without weakening the
 // adapter's final request-boundary validation.
+//
+// Live 2026-10-29: grok-imagine-video and grok-imagine-video-1.5 both answer
+// 15 references with "Too many reference images: 15. Maximum allowed is 14.";
+// grok-imagine-video-1.5-lite rejects reference_images entirely.
 const (
-	ConsoleVideoMaxReferenceImages          = 7
+	ConsoleVideoMaxReferenceImages          = 14
 	ConsoleVideoMaxReferenceDurationSeconds = 10
+	// WebVideoMaxReferenceImages is the Grok Web Imagine reference ceiling.
+	WebVideoMaxReferenceImages = 7
 )
 
 type VideoRequest struct {

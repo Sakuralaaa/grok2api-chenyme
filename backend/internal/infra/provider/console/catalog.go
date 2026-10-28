@@ -20,17 +20,24 @@ type ModelSpec struct {
 	DefaultReasoningEffort  string
 	MaxOutputTokens         int
 	// NoSearchTools marks models whose upstream ignores the built-in
-	// web_search / x_search tools (live 2026-10-20 on grok-4.5: tool_choice
-	// "auto" → 200 with zero tool calls; "required" → 500 after ~40s).
+	// web_search / x_search tools. No current Console chat model needs it:
+	// grok-4.5 was flagged on 2026-10-20, but live 2026-10-29 it called
+	// web_search three times for one request.
 	NoSearchTools bool
 }
 
+// Synced with the Console home SSR model list (auth_mgmt.ListModelsForTeamResponse)
+// and live probes on 2026-10-29: 4.7/4.6/4.5 accept low/medium/high/xhigh with
+// upstream default high; 4.3 accepts none..xhigh with upstream default low. All
+// chat models accept web_search/x_search and max_output_tokens=1_000_000.
 var catalog = []ModelSpec{
-	{PublicID: "grok-4.3", UpstreamModel: "grok-4.3", SupportsReasoning: true, SupportsReasoningEffort: true, DefaultReasoningEffort: "medium", MaxOutputTokens: 1_000_000},
+	{PublicID: "grok-4.7", UpstreamModel: "grok-4.7", SupportsReasoning: true, SupportsReasoningEffort: true, DefaultReasoningEffort: "high", MaxOutputTokens: 1_000_000},
+	{PublicID: "grok-4.6", UpstreamModel: "grok-4.6", SupportsReasoning: true, SupportsReasoningEffort: true, DefaultReasoningEffort: "high", MaxOutputTokens: 1_000_000},
+	{PublicID: "grok-4.3", UpstreamModel: "grok-4.3", SupportsReasoning: true, SupportsReasoningEffort: true, DefaultReasoningEffort: "low", MaxOutputTokens: 1_000_000},
 	{PublicID: "grok-4.20-0309-reasoning", UpstreamModel: "grok-4.20-0309-reasoning", SupportsReasoning: true, MaxOutputTokens: 1_000_000},
 	{PublicID: "grok-4.20-0309-non-reasoning", UpstreamModel: "grok-4.20-0309-non-reasoning", MaxOutputTokens: 1_000_000},
 	{PublicID: "grok-4.20-multi-agent-0309", UpstreamModel: "grok-4.20-multi-agent-0309", SupportsReasoning: true, SupportsReasoningEffort: true, MaxOutputTokens: 1_000_000},
-	{PublicID: "grok-4.5", UpstreamModel: "grok-4.5", SupportsReasoning: true, SupportsReasoningEffort: true, DefaultReasoningEffort: "medium", MaxOutputTokens: 1_000_000, NoSearchTools: true},
+	{PublicID: "grok-4.5", UpstreamModel: "grok-4.5", SupportsReasoning: true, SupportsReasoningEffort: true, DefaultReasoningEffort: "high", MaxOutputTokens: 1_000_000},
 	{PublicID: "grok-build-0.1", UpstreamModel: "grok-build-0.1", MaxOutputTokens: 256_000},
 }
 
@@ -48,6 +55,8 @@ var mediaCatalog = []struct {
 	{PublicID: "grok-imagine-video", UpstreamModel: "grok-imagine-video", Capabilities: []modeldomain.Capability{modeldomain.CapabilityVideo}},
 	// Free Console accounts can use the 1.5 video model on the official Console media API.
 	{PublicID: "grok-imagine-video-1.5", UpstreamModel: "grok-imagine-video-1.5", Capabilities: []modeldomain.Capability{modeldomain.CapabilityVideo}},
+	// Low-cost 1.5 tier: text/image-to-video only (no reference_images / reference_audios).
+	{PublicID: "grok-imagine-video-1.5-lite", UpstreamModel: "grok-imagine-video-1.5-lite", Capabilities: []modeldomain.Capability{modeldomain.CapabilityVideo}},
 	{PublicID: "grok-voice-latest", UpstreamModel: "grok-voice-latest", Capabilities: []modeldomain.Capability{modeldomain.CapabilityRealtime, modeldomain.CapabilityTTS}},
 	{PublicID: "grok-voice-think-fast-2.0", UpstreamModel: "grok-voice-think-fast-2.0", Capabilities: []modeldomain.Capability{modeldomain.CapabilityRealtime, modeldomain.CapabilityTTS}},
 	{PublicID: "grok-voice-think-fast-1.0", UpstreamModel: "grok-voice-think-fast-1.0", Capabilities: []modeldomain.Capability{modeldomain.CapabilityRealtime, modeldomain.CapabilityTTS}},
@@ -61,6 +70,8 @@ var aliases = []provider.ModelAlias{
 	// Compatibility for the temporary PR catalog name. The official quality
 	// model itself remains a first-class route.
 	consoleAlias("grok-imagine-image-quality-2.0", "grok-imagine-image-quality", "grok-imagine-image-quality", ""),
+	consoleAlias("grok-4.7-console", "grok-4.7", "grok-4.7", ""),
+	consoleAlias("grok-4.6-console", "grok-4.6", "grok-4.6", ""),
 	consoleAlias("grok-4.3-console", "grok-4.3", "grok-4.3", ""),
 	consoleAlias("grok-4.20-0309-reasoning-console", "grok-4.20-0309-reasoning", "grok-4.20-0309-reasoning", ""),
 	consoleAlias("grok-4.20-0309-non-reasoning-console", "grok-4.20-0309-non-reasoning", "grok-4.20-0309-non-reasoning", ""),
@@ -70,6 +81,7 @@ var aliases = []provider.ModelAlias{
 	consoleAlias("grok-4.3-low", "grok-4.3", "grok-4.3", "low"),
 	consoleAlias("grok-4.3-medium", "grok-4.3", "grok-4.3", "medium"),
 	consoleAlias("grok-4.3-high", "grok-4.3", "grok-4.3", "high"),
+	consoleAlias("grok-4.3-xhigh", "grok-4.3", "grok-4.3", "xhigh"),
 	consoleAlias("grok-4.20-multi-agent-low", "grok-4.20-multi-agent-0309", "grok-4.20-multi-agent-0309", "low"),
 	consoleAlias("grok-4.20-multi-agent-medium", "grok-4.20-multi-agent-0309", "grok-4.20-multi-agent-0309", "medium"),
 	consoleAlias("grok-4.20-multi-agent-high", "grok-4.20-multi-agent-0309", "grok-4.20-multi-agent-0309", "high"),

@@ -23,6 +23,16 @@ func normalizeRequest(body []byte, spec ModelSpec) ([]byte, error) {
 }
 
 func normalizeRequestWithMetadata(body []byte, spec ModelSpec, metadata *provider.NormalizedRequestMetadata) ([]byte, error) {
+	return normalizeConsoleRequest(body, spec, metadata, false)
+}
+
+// normalizeConsoleChatRequest is the outbound chat path: besides the Console
+// contract it turns on web_search and x_search by default for every chat model.
+func normalizeConsoleChatRequest(body []byte, spec ModelSpec, metadata *provider.NormalizedRequestMetadata) ([]byte, error) {
+	return normalizeConsoleRequest(body, spec, metadata, true)
+}
+
+func normalizeConsoleRequest(body []byte, spec ModelSpec, metadata *provider.NormalizedRequestMetadata, defaultSearchTools bool) ([]byte, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("解析 Console Responses 请求: %w", err)
@@ -53,6 +63,8 @@ func normalizeRequestWithMetadata(body []byte, spec ModelSpec, metadata *provide
 	}
 	if spec.NoSearchTools {
 		stripConsoleSearchTools(payload)
+	} else if defaultSearchTools {
+		ensureConsoleDefaultSearchTools(payload)
 	}
 	normalizeConsoleToolChoice(payload, retainedClientTools)
 	ensureConsoleToolChoicePair(payload)
@@ -365,6 +377,35 @@ func normalizeConsoleTools(payload map[string]any) (bool, error) {
 	}
 	payload["tools"] = result
 	return retainedClientTools, nil
+}
+
+// ensureConsoleDefaultSearchTools enables the server-side web_search and
+// x_search tools on every Console chat request. A tool the client already
+// declared keeps its own options; only missing ones are appended with the same
+// defaults normalizeConsoleTools applies. tool_choice "none" from the client is
+// still honoured by normalizeConsoleToolChoice.
+func ensureConsoleDefaultSearchTools(payload map[string]any) {
+	tools, _ := payload["tools"].([]any)
+	hasWeb, hasX := false, false
+	for _, rawTool := range tools {
+		tool, ok := rawTool.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch typeName, _ := tool["type"].(string); typeName {
+		case "web_search":
+			hasWeb = true
+		case "x_search":
+			hasX = true
+		}
+	}
+	if !hasWeb {
+		tools = append(tools, map[string]any{"type": "web_search", "enable_image_understanding": !hasConsoleFunctionTool(tools, "view_image")})
+	}
+	if !hasX {
+		tools = append(tools, map[string]any{"type": "x_search", "enable_video_understanding": true})
+	}
+	payload["tools"] = tools
 }
 
 // stripConsoleSearchTools removes built-in search tools the model ignores.

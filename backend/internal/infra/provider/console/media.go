@@ -28,12 +28,16 @@ const (
 	consoleImageDownloadTimeout = 45 * time.Second
 	consoleMediaOutputAttempts  = 3
 	consoleVideoPollEvery       = 2 * time.Second
-	consoleMaxEditImages        = 3
+	// Edit input ceilings, live 2026-10-29: grok-imagine-image and -2.0 answer
+	// "supports at most 5 input image(s)"; -quality answers "at most 3".
+	consoleMaxEditImages        = 5
+	consoleMaxQualityEditImages = 3
 	// Upstream enforces the two video image inputs separately (measured against
 	// console.x.ai on both grok-imagine-video and grok-imagine-video-1.5):
 	//   image            = first frame, image-to-video, at most 1
-	//   reference_images = style/content references, reference-to-video, at most 7
-	//     8 references answer 400 "Too many reference images: 8. Maximum allowed is 7."
+	//   reference_images = style/content references, reference-to-video, at most 14
+	//     15 references answer 400 "Too many reference images: 15. Maximum allowed is 14."
+	//     (grok-imagine-video-1.5-lite rejects reference_images/reference_audios)
 	// The two are mutually exclusive below and their limits are never summed, so a
 	// combined ceiling would accept payloads that upstream then rejects.
 	consoleMaxVideoFirstFrames = 1
@@ -107,7 +111,7 @@ func (a *Adapter) GenerateImage(ctx context.Context, request provider.ImageGener
 	if err != nil {
 		return invalidConsoleMediaRequest(err.Error()), nil
 	}
-	resolution, err := normalizeConsoleImageResolution(request.Resolution)
+	resolution, err := normalizeConsoleImageResolution(request.Model, request.Resolution)
 	if err != nil {
 		return invalidConsoleMediaRequest(err.Error()), nil
 	}
@@ -135,8 +139,8 @@ func (a *Adapter) EditImage(ctx context.Context, request provider.ImageEditReque
 	if request.Streaming || request.PartialImages != 0 {
 		return invalidConsoleMediaRequest("Grok Console 标准图片接口不支持 stream 或 partial_images"), nil
 	}
-	if len(request.ImageURLs) == 0 || len(request.ImageURLs) > consoleMaxEditImages {
-		return invalidConsoleMediaRequest("Console 图片编辑必须提供 1 到 3 张图片"), nil
+	if maxImages := consoleEditImageLimit(request.Model); len(request.ImageURLs) == 0 || len(request.ImageURLs) > maxImages {
+		return invalidConsoleMediaRequest(fmt.Sprintf("Console %s 图片编辑必须提供 1 到 %d 张图片", request.Model, maxImages)), nil
 	}
 	count := request.Count
 	if count <= 0 {
@@ -153,7 +157,7 @@ func (a *Adapter) EditImage(ctx context.Context, request provider.ImageEditReque
 	if err != nil {
 		return invalidConsoleMediaRequest(err.Error()), nil
 	}
-	resolution, err := normalizeConsoleImageResolution(request.Resolution)
+	resolution, err := normalizeConsoleImageResolution(request.Model, request.Resolution)
 	if err != nil {
 		return invalidConsoleMediaRequest(err.Error()), nil
 	}
@@ -467,6 +471,9 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if firstFrames > consoleMaxVideoFirstFrames {
 		return provider.VideoResult{}, fmt.Errorf("Console %s 最多支持 %d 张首帧图，当前为 %d 张", modelName, consoleMaxVideoFirstFrames, firstFrames)
 	}
+	if modelName == "grok-imagine-video-1.5-lite" && (referenceImages > 0 || len(request.ReferenceAudios) > 0) {
+		return provider.VideoResult{}, fmt.Errorf("%s 不支持 reference_images 或 reference_audios", modelName)
+	}
 	if referenceImages > provider.ConsoleVideoMaxReferenceImages {
 		return provider.VideoResult{}, fmt.Errorf("Console %s 最多支持 %d 张参考图，当前为 %d 张", modelName, provider.ConsoleVideoMaxReferenceImages, referenceImages)
 	}
@@ -494,7 +501,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		return provider.VideoResult{}, errors.New("视频编辑不支持 duration")
 	}
 	if request.Resolution == "1080p" {
-		if modelName != "grok-imagine-video-1.5" {
+		if modelName != "grok-imagine-video-1.5" && modelName != "grok-imagine-video-1.5-lite" {
 			return provider.VideoResult{}, fmt.Errorf("%s 不支持 1080p", modelName)
 		}
 		if len(request.ReferenceURLs) > 0 {
@@ -755,15 +762,31 @@ func normalizeConsoleImageFormat(value string) (string, error) {
 	return value, nil
 }
 
-func normalizeConsoleImageResolution(value string) (string, error) {
+func consoleEditImageLimit(model string) int {
+	if strings.TrimSpace(model) == "grok-imagine-image-quality" {
+		return consoleMaxQualityEditImages
+	}
+	return consoleMaxEditImages
+}
+
+// normalizeConsoleImageResolution follows the Console resolution enum
+// (1k/1.5k/2k; 4k answers 422). grok-imagine-image only prices 1k and 2k, while
+// -quality and -2.0 also accept 1.5k (live 2026-10-29).
+func normalizeConsoleImageResolution(model, value string) (string, error) {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {
 		return "", nil
 	}
-	if value != "1k" && value != "2k" {
-		return "", errors.New("resolution 必须是 1k 或 2k")
+	switch value {
+	case "1k", "2k":
+		return value, nil
+	case "1.5k":
+		if strings.TrimSpace(model) == "grok-imagine-image" {
+			return "", errors.New("grok-imagine-image 的 resolution 只支持 1k 或 2k")
+		}
+		return value, nil
 	}
-	return value, nil
+	return "", errors.New("resolution 必须是 1k、1.5k 或 2k")
 }
 
 func normalizeConsoleImageQuality(model, value string) (string, error) {
@@ -774,8 +797,8 @@ func normalizeConsoleImageQuality(model, value string) (string, error) {
 	if strings.TrimSpace(model) != "grok-imagine-image-2.0" {
 		return "", errors.New("quality 仅支持 grok-imagine-image-2.0")
 	}
-	if value != "low" && value != "medium" {
-		return "", errors.New("quality 必须是 low 或 medium")
+	if value != "low" && value != "medium" && value != "auto" {
+		return "", errors.New("quality 必须是 low、medium 或 auto")
 	}
 	return value, nil
 }
@@ -790,6 +813,7 @@ func resolveConsoleImageAspectRatio(aspectRatio, size string) (string, error) {
 	}
 	values := map[string]string{
 		"1:1": "1:1", "16:9": "16:9", "9:16": "9:16", "4:3": "4:3", "3:4": "3:4", "3:2": "3:2", "2:3": "2:3", "2:1": "2:1", "1:2": "1:2",
+		"9:19.5": "9:19.5", "19.5:9": "19.5:9", "9:20": "9:20", "20:9": "20:9", "21:9": "21:9", "5:2": "5:2",
 		"1024x1024": "1:1", "1280x720": "16:9", "720x1280": "9:16", "1792x1024": "3:2", "1536x1024": "3:2", "1024x1792": "2:3", "1024x1536": "2:3",
 	}
 	if resolved := values[value]; resolved != "" {

@@ -44,6 +44,8 @@ func TestCatalogContainsAllConsoleModelsAndAliases(t *testing.T) {
 		capability modeldomain.Capability
 	}
 	expected := map[routeKey]string{
+		{publicID: "Console/grok-4.7", capability: modeldomain.CapabilityResponses}:                     "grok-4.7",
+		{publicID: "Console/grok-4.6", capability: modeldomain.CapabilityResponses}:                     "grok-4.6",
 		{publicID: "Console/grok-4.3", capability: modeldomain.CapabilityResponses}:                     "grok-4.3",
 		{publicID: "Console/grok-4.20-0309-reasoning", capability: modeldomain.CapabilityResponses}:     "grok-4.20-0309-reasoning",
 		{publicID: "Console/grok-4.20-0309-non-reasoning", capability: modeldomain.CapabilityResponses}: "grok-4.20-0309-non-reasoning",
@@ -58,6 +60,7 @@ func TestCatalogContainsAllConsoleModelsAndAliases(t *testing.T) {
 		{publicID: "Console/grok-imagine-image-2.0", capability: modeldomain.CapabilityImageEdit}:       "grok-imagine-image-2.0",
 		{publicID: "Console/grok-imagine-video", capability: modeldomain.CapabilityVideo}:               "grok-imagine-video",
 		{publicID: "Console/grok-imagine-video-1.5", capability: modeldomain.CapabilityVideo}:           "grok-imagine-video-1.5",
+		{publicID: "Console/grok-imagine-video-1.5-lite", capability: modeldomain.CapabilityVideo}:      "grok-imagine-video-1.5-lite",
 		{publicID: "Console/grok-voice-latest", capability: modeldomain.CapabilityRealtime}:             "grok-voice-latest",
 		{publicID: "Console/grok-voice-latest", capability: modeldomain.CapabilityTTS}:                  "grok-voice-latest",
 		{publicID: "Console/grok-voice-think-fast-2.0", capability: modeldomain.CapabilityRealtime}:     "grok-voice-think-fast-2.0",
@@ -79,8 +82,8 @@ func TestCatalogContainsAllConsoleModelsAndAliases(t *testing.T) {
 		}
 	}
 	aliases := Aliases()
-	if len(aliases) != 14 {
-		t.Fatalf("aliases = %d, want 14", len(aliases))
+	if len(aliases) != 17 {
+		t.Fatalf("aliases = %d, want 17", len(aliases))
 	}
 	registry := provider.NewRegistry(NewAdapter(Config{}, nil, nil, nil))
 	if registry.SupportsStoredResponses(account.ProviderConsole) {
@@ -90,8 +93,8 @@ func TestCatalogContainsAllConsoleModelsAndAliases(t *testing.T) {
 		"grok-imagine-image-quality-2.0",
 		"grok-4.3-console", "grok-4.20-0309-reasoning-console",
 		"grok-4.20-0309-non-reasoning-console", "grok-4.20-multi-agent-console", "grok-build-console",
-		"grok-4.3-low", "grok-4.3-medium", "grok-4.3-high",
-		"grok-4.5-console",
+		"grok-4.3-low", "grok-4.3-medium", "grok-4.3-high", "grok-4.3-xhigh",
+		"grok-4.5-console", "grok-4.6-console", "grok-4.7-console",
 		"grok-4.20-multi-agent-low", "grok-4.20-multi-agent-medium", "grok-4.20-multi-agent-high", "grok-4.20-multi-agent-xhigh",
 	} {
 		alias, ok := registry.ResolveModelAlias(name)
@@ -645,7 +648,45 @@ func TestNormalizeRequestAvoidsClientViewImageToolCollision(t *testing.T) {
 	}
 }
 
-func TestNormalizeRequestDoesNotInjectToolsForConsoleCatalog(t *testing.T) {
+func TestNormalizeConsoleChatRequestEnablesSearchToolsByDefault(t *testing.T) {
+	for _, spec := range catalog {
+		t.Run(spec.PublicID, func(t *testing.T) {
+			body, err := normalizeConsoleChatRequest([]byte(`{"model":"public","input":"hello","tool_choice":"required"}`), spec, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatal(err)
+			}
+			tools, _ := payload["tools"].([]any)
+			if len(tools) != 2 || toolIdentity(tools[0]) != "web_search" || toolIdentity(tools[1]) != "x_search" || payload["tool_choice"] != "auto" {
+				t.Fatalf("default search tools = %#v", payload)
+			}
+		})
+	}
+	spec, _ := Resolve("grok-4.7")
+	body, err := normalizeConsoleChatRequest([]byte(`{"input":"hi","tool_choice":"none","tools":[{"type":"x_search","enable_video_understanding":false},{"type":"function","name":"view_image","parameters":{"type":"object"}}]}`), spec, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	tools, _ := payload["tools"].([]any)
+	if len(tools) != 3 || payload["tool_choice"] != "none" {
+		t.Fatalf("client tools/tool_choice not preserved: %#v", payload)
+	}
+	if xSearch, _ := tools[0].(map[string]any); xSearch["enable_video_understanding"] != false {
+		t.Fatalf("client x_search options overwritten: %#v", xSearch)
+	}
+	if webSearch, _ := tools[2].(map[string]any); webSearch["type"] != "web_search" || webSearch["enable_image_understanding"] != false {
+		t.Fatalf("injected web_search must yield view_image to the client: %#v", webSearch)
+	}
+}
+
+func TestNormalizeRequestDoesNotInjectToolsWithoutChatPath(t *testing.T) {
 	for _, spec := range catalog {
 		t.Run(spec.PublicID, func(t *testing.T) {
 			body, err := normalizeRequest([]byte(`{"model":"public","input":"hello","tool_choice":"required"}`), spec)
@@ -712,7 +753,7 @@ func TestNormalizeRequestReasoningMetadataTracksOnlyExplicitCanonicalValues(t *t
 		want string
 	}{
 		{name: "absent default stays unaudited", body: `{"input":"hello"}`},
-		{name: "auto resolves to provider default", body: `{"input":"hello","reasoning":{"effort":"auto"}}`, want: "medium"},
+		{name: "auto resolves to provider default", body: `{"input":"hello","reasoning":{"effort":"auto"}}`, want: "low"},
 		{name: "max resolves to xhigh", body: `{"input":"hello","reasoning":{"effort":"max"}}`, want: "xhigh"},
 		{name: "arbitrary value is not persisted", body: `{"input":"hello","reasoning":{"effort":"customer@example.com"}}`},
 	}

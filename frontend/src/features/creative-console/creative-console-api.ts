@@ -87,7 +87,7 @@ export async function generateImage(input: {
   count: number;
   aspectRatio: string;
   resolution: string;
-  quality?: "low" | "medium";
+  quality?: "low" | "medium" | "auto";
   signal?: AbortSignal;
 }): Promise<ImageResult[]> {
   const payload = await publicApiRequest(

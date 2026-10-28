@@ -162,7 +162,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			body, err = conversation.ConvertRequest(body, request.Model, request.Operation)
 		}
 		if err == nil {
-			body, err = normalizeRequestWithMetadata(body, spec, request.NormalizedMetadata)
+			body, err = normalizeConsoleChatRequest(body, spec, request.NormalizedMetadata)
 		}
 		if err != nil {
 			return invalidConversationResponse(request.Operation, err), nil

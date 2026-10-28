@@ -87,6 +87,9 @@ func IsGrokComposerModel(value string) bool {
 var providerReasoningEffortOverrides = map[account.Provider]map[string][]string{
 	account.ProviderConsole: {
 		"grok-4.20-0309-reasoning": {},
+		// Console catalog (2026-10-29): xhigh is accepted on 4.5 and 4.3; max is rejected.
+		"grok-4.5": {ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh, ReasoningEffortXHigh},
+		"grok-4.3": {ReasoningEffortNone, ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh, ReasoningEffortXHigh},
 	},
 }
 

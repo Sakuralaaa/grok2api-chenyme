@@ -179,12 +179,18 @@ func TestVideoPricingLeavesUnmeasurableOperationsUnpriced(t *testing.T) {
 // 上游对 Console 视频的这两条限制原先只在 provider 层拦截，而生成接口是异步的，
 // 客户端会先拿到 request_id 再从轮询里读到失败任务。入队前校验让错误立刻可见。
 func TestVideoRouteParametersRejectConsoleReferenceLimits(t *testing.T) {
-	// 实测：8 张 reference_images 上游回 400 "Too many reference images: 8. Maximum allowed is 7."
-	if err := validateVideoRouteParameters(account.ProviderConsole, provider.VideoOperationGenerate, "grok-imagine-video-1.5", "720p", false, 8, 6); !errors.Is(err, ErrVideoParameterInvalid) {
-		t.Fatalf("8 references error = %v", err)
+	// 实测 2026-10-29：15 张 reference_images 上游回 400 "Too many reference images: 15. Maximum allowed is 14."
+	if err := validateVideoRouteParameters(account.ProviderConsole, provider.VideoOperationGenerate, "grok-imagine-video-1.5", "720p", false, 15, 6); !errors.Is(err, ErrVideoParameterInvalid) {
+		t.Fatalf("15 references error = %v", err)
 	}
-	if err := validateVideoRouteParameters(account.ProviderConsole, provider.VideoOperationGenerate, "grok-imagine-video-1.5", "720p", false, 7, 6); err != nil {
-		t.Fatalf("7 references error = %v", err)
+	if err := validateVideoRouteParameters(account.ProviderConsole, provider.VideoOperationGenerate, "grok-imagine-video-1.5", "720p", false, 14, 6); err != nil {
+		t.Fatalf("14 references error = %v", err)
+	}
+	if err := validateVideoRouteParameters(account.ProviderConsole, provider.VideoOperationGenerate, "grok-imagine-video-1.5-lite", "720p", false, 1, 6); err == nil {
+		t.Fatal("1.5-lite must reject reference_images")
+	}
+	if err := validateVideoRouteParameters(account.ProviderConsole, provider.VideoOperationGenerate, "grok-imagine-video-1.5-lite", "1080p", false, 0, 6); err != nil {
+		t.Fatalf("1.5-lite 1080p error = %v", err)
 	}
 	// 实测：grok-imagine-video 的 reference-to-video 回 400
 	// "Duration 15s exceeds the maximum allowed for reference-to-video, which is 10s."
@@ -201,7 +207,7 @@ func TestVideoRouteParametersRejectConsoleReferenceLimits(t *testing.T) {
 	if err := validateVideoRouteParameters(account.ProviderConsole, provider.VideoOperationGenerate, "grok-imagine-video-1.5", "720p", false, 2, 15); err != nil {
 		t.Fatalf("1.5 multi-reference 15s error = %v", err)
 	}
-	// Build 使用相同的 1.5 上游模型名，但支持通用上限 8；不能因同名套用 Console 的 7 张限制。
+	// Build 使用相同的 1.5 上游模型名，但支持通用上限 8；不能因同名套用 Console 的上限。
 	if err := validateVideoRouteParameters(account.ProviderBuild, provider.VideoOperationGenerate, "grok-imagine-video-1.5", "720p", false, 8, 15); err != nil {
 		t.Fatalf("Build 1.5 references error = %v", err)
 	}
@@ -228,14 +234,14 @@ func TestRoutesForVideoParametersKeepsCompatibleSameNameProviders(t *testing.T) 
 		{ID: 1, PublicID: "shared-video", Provider: account.ProviderConsole, UpstreamModel: "grok-imagine-video-1.5"},
 		{ID: 2, PublicID: "shared-video", Provider: account.ProviderBuild, UpstreamModel: "grok-imagine-video-1.5"},
 	}
-	compatible, err := routesForVideoParameters(routes, provider.VideoOperationGenerate, "720p", false, 8, 15)
+	compatible, err := routesForVideoParameters(routes, provider.VideoOperationGenerate, "720p", false, 15, 15)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(compatible) != 1 || compatible[0].ID != 2 {
 		t.Fatalf("compatible routes = %#v", compatible)
 	}
-	if _, err := routesForVideoParameters(routes[:1], provider.VideoOperationGenerate, "720p", false, 8, 15); !errors.Is(err, ErrVideoParameterInvalid) {
+	if _, err := routesForVideoParameters(routes[:1], provider.VideoOperationGenerate, "720p", false, 15, 15); !errors.Is(err, ErrVideoParameterInvalid) {
 		t.Fatalf("Console-only invalid route error = %v", err)
 	}
 }

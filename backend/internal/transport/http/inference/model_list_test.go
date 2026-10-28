@@ -60,7 +60,7 @@ func TestAppendReasoningModelAliasesUsesRealSupportedLevels(t *testing.T) {
 		}
 	}
 	for _, reject := range []string{
-		"grok-4.5-none", "grok-4.5-xhigh", "grok-4.5-max", "grok-4.3-xhigh", "grok-build-0.1-none",
+		"grok-4.5-none", "grok-4.5-xhigh", "grok-4.5-max", "grok-build-0.1-none",
 		"grok-4.20-0309-reasoning-low", "grok-4.20-0309-reasoning-medium", "grok-4.20-0309-reasoning-high",
 	} {
 		if ids[reject] {

@@ -471,9 +471,10 @@ func TestIsAllowedWorkOSHost(t *testing.T) {
 	}
 }
 
-func TestNormalizeRequestStripsSearchToolsForGrok45(t *testing.T) {
+func TestNormalizeRequestStripsSearchToolsForNoSearchModels(t *testing.T) {
 	t.Parallel()
 	spec, _ := Resolve("grok-4.5")
+	spec.NoSearchTools = true
 	body, err := normalizeRequest([]byte(`{"input":"hi","tools":[{"type":"web_search"},{"type":"x_search"}],"tool_choice":"auto"}`), spec)
 	if err != nil {
 		t.Fatal(err)

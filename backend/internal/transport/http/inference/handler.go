@@ -420,8 +420,8 @@ func (h *Handler) generateImage(c *gin.Context) {
 		}
 	}
 	quality := strings.ToLower(strings.TrimSpace(request.Quality))
-	if quality != "" && quality != "low" && quality != "medium" {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "quality 必须是 low 或 medium")
+	if quality != "" && quality != "low" && quality != "medium" && quality != "auto" {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "quality 必须是 low、medium 或 auto")
 		return
 	}
 	clientKey, requestID, ok := requestIdentity(c)
@@ -631,13 +631,13 @@ func (h *Handler) executeImageEdit(c *gin.Context, request imageEditJSONRequest,
 	if resolution == "" {
 		resolution = "1k"
 	}
-	if resolution != "1k" && resolution != "2k" {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "resolution 必须是 1k 或 2k")
+	if resolution != "1k" && resolution != "1.5k" && resolution != "2k" {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "resolution 必须是 1k、1.5k 或 2k")
 		return
 	}
 	quality := strings.ToLower(strings.TrimSpace(request.Quality))
-	if quality != "" && quality != "low" && quality != "medium" {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "quality 必须是 low 或 medium")
+	if quality != "" && quality != "low" && quality != "medium" && quality != "auto" {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "quality 必须是 low、medium 或 auto")
 		return
 	}
 	clientKey, requestID, ok := requestIdentity(c)
@@ -1035,7 +1035,7 @@ func validVideoAspectRatio(value string) bool {
 
 func validImageAspectRatio(value string) bool {
 	switch value {
-	case "auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "19.5:9", "9:19.5", "20:9", "9:20":
+	case "auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "19.5:9", "9:19.5", "20:9", "9:20", "21:9", "5:2":
 		return true
 	default:
 		return false
