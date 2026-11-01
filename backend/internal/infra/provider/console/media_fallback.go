@@ -18,17 +18,34 @@ import (
 )
 
 // Console 免费账号的 /v1/images/generations 与 /v1/images/edits 会按请求随机返回
-// 402 personal-team-blocked:spending-limit（2026-11 实测：同一账号、同一请求约 20%~30%
-// 成功，失败不扣额度）。因此先在同一账号上重试标准图片接口，以保留 resolution、
-// quality、aspect_ratio 等参数；仍失败时退回 Playground 同款链路：/v1/responses +
-// image_generation 工具（由对话模型调用生图工具，稳定可用，但只能用提示词控制比例与张数）。
+// 402 personal-team-blocked:spending-limit（2026-11 实测：失败不扣额度；us-east-1 上
+// 几乎必失败，us-west-2 约 20%~45% 成功，与提示词、连接、请求间隔、DPoP、账号用量无关）。
+// 降级顺序（尽量保证每次生图都成功）：
+//  1. 标准图片接口固定 us-west-2，快速重试，保留 resolution、quality、aspect_ratio；
+//  2. Playground 同款链路：/v1/responses + image_generation 工具，按 consoleImageToolPlans
+//     依次换模型/集群（grok-4.20 与 grok-4.3 不受按团队的工具门控）；
+//  3. 工具链路返回 402/429 视为账号额度真实耗尽，原样返回，由网关标记账号并换号；
+//     其它失败返回 503 console_image_unavailable，网关软冷却后换下一个账号重试。
 const (
-	consoleImageSpendingLimitAttempts = 6
+	consoleImageSpendingLimitAttempts = 8
 	consoleImageToolModel             = "grok-4.20-0309-non-reasoning"
 	consoleImageToolBodyLimit         = 48 << 20
+	// ConsoleImageTransientHeader 标记本账号所有生图链路暂不可用（非额度问题），网关据此换号。
+	ConsoleImageTransientHeader = "X-Grok2API-Console-Image-Transient"
 )
 
-var consoleImageRetryDelays = [...]time.Duration{250 * time.Millisecond, 500 * time.Millisecond, 750 * time.Millisecond, time.Second}
+var consoleImageRetryDelays = [...]time.Duration{100 * time.Millisecond, 150 * time.Millisecond, 200 * time.Millisecond, 300 * time.Millisecond}
+
+type consoleImageToolPlan struct {
+	model   string
+	cluster string
+}
+
+var consoleImageToolPlans = []consoleImageToolPlan{
+	{model: consoleImageToolModel, cluster: consoleClusterUSEast1},
+	{model: consoleImageToolModel, cluster: consoleClusterUSWest2},
+	{model: "grok-4.3", cluster: consoleClusterUSEast1},
+}
 
 type consoleImageFallback struct {
 	prompt      string
@@ -37,9 +54,8 @@ type consoleImageFallback struct {
 	inputImages []string
 }
 
-// forwardConsoleImage 包装 forwardConsoleMedia：随机 402 时重试，最终退回 image_generation 工具。
+// forwardConsoleImage 包装 forwardConsoleMedia：随机 402 时重试，再按计划退回 image_generation 工具。
 func (a *Adapter) forwardConsoleImage(ctx context.Context, credential account.Credential, path string, payload any, format string, count int, fallback consoleImageFallback) (*provider.Response, error) {
-	var last *provider.Response
 	for attempt := 0; attempt < consoleImageSpendingLimitAttempts; attempt++ {
 		result, err := a.forwardConsoleMedia(ctx, credential, path, payload, format, count)
 		if err != nil {
@@ -48,23 +64,59 @@ func (a *Adapter) forwardConsoleImage(ctx context.Context, credential account.Cr
 		if !isConsoleImageSpendingLimitResponse(result) {
 			return result, nil
 		}
-		last = result
+		closeProviderResponse(result)
 		if attempt+1 < consoleImageSpendingLimitAttempts {
 			if err := sleepConsoleImageRetry(ctx, attempt); err != nil {
 				return nil, err
 			}
 		}
 	}
-	a.logger().Info("console_image_tool_fallback", "account_id", credential.ID, "path", path, "attempts", consoleImageSpendingLimitAttempts)
-	toolResult, err := a.generateConsoleImageViaTool(ctx, credential, format, fallback)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, err
+	var lastErr error
+	for index, plan := range consoleImageToolPlans {
+		a.logger().Info("console_image_tool_fallback", "account_id", credential.ID, "path", path, "standard_attempts", consoleImageSpendingLimitAttempts, "plan", index, "model", plan.model, "cluster", plan.cluster)
+		result, err := a.generateConsoleImageViaTool(withConsoleCluster(ctx, plan.cluster), credential, format, plan.model, fallback)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if provider.IsMediaPostProcessingError(err) {
+				return nil, err
+			}
+			lastErr = err
+			a.logger().Warn("console_image_tool_fallback_failed", "account_id", credential.ID, "plan", index, "model", plan.model, "error", err)
+			continue
 		}
-		a.logger().Warn("console_image_tool_fallback_failed", "account_id", credential.ID, "error", err)
-		return last, nil
+		if result.StatusCode >= 200 && result.StatusCode < 300 {
+			return result, nil
+		}
+		if result.StatusCode >= 400 && result.StatusCode < 500 && result.StatusCode != http.StatusRequestTimeout {
+			// 402/429：账号额度真实耗尽或限流；其它 4xx：请求本身被拒（如内容审核），换模型也无用。
+			result.Header.Set("X-Grok2API-Console-Image-Path", "image_generation_tool")
+			return result, nil
+		}
+		lastErr = fmt.Errorf("Console 生图工具返回 HTTP %d", result.StatusCode)
+		closeProviderResponse(result)
+		a.logger().Warn("console_image_tool_fallback_failed", "account_id", credential.ID, "plan", index, "model", plan.model, "status", result.StatusCode)
 	}
-	return toolResult, nil
+	return consoleImageUnavailableResponse(lastErr), nil
+}
+
+func closeProviderResponse(result *provider.Response) {
+	if result != nil && result.Body != nil {
+		_ = result.Body.Close()
+	}
+}
+
+func consoleImageUnavailableResponse(cause error) *provider.Response {
+	message := "Console 生图暂不可用：标准图片接口与生图工具均未成功"
+	if cause != nil {
+		message += "（" + cause.Error() + "）"
+	}
+	data, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": "upstream_unavailable", "code": "console_image_unavailable"}})
+	result := jsonRawProviderResponse(http.StatusServiceUnavailable, data)
+	result.Header.Set(ConsoleImageTransientHeader, "1")
+	result.Diagnostic = &provider.DiagnosticResponse{StatusCode: http.StatusServiceUnavailable, Status: "503 Service Unavailable", Header: result.Header.Clone(), Body: data}
+	return result
 }
 
 func sleepConsoleImageRetry(ctx context.Context, attempt int) error {
@@ -130,7 +182,7 @@ func buildConsoleImageToolPrompt(fallback consoleImageFallback) string {
 	return builder.String()
 }
 
-func buildConsoleImageToolPayload(fallback consoleImageFallback) map[string]any {
+func buildConsoleImageToolPayload(model string, fallback consoleImageFallback) map[string]any {
 	text := buildConsoleImageToolPrompt(fallback)
 	var input any = text
 	if len(fallback.inputImages) > 0 {
@@ -141,7 +193,7 @@ func buildConsoleImageToolPayload(fallback consoleImageFallback) map[string]any 
 		input = []map[string]any{{"role": "user", "content": content}}
 	}
 	return map[string]any{
-		"model":       consoleImageToolModel,
+		"model":       model,
 		"input":       input,
 		"stream":      false,
 		"store":       false,
@@ -175,12 +227,12 @@ func parseConsoleImageToolOutput(data []byte) ([]string, error) {
 	return images, nil
 }
 
-func (a *Adapter) generateConsoleImageViaTool(ctx context.Context, credential account.Credential, format string, fallback consoleImageFallback) (*provider.Response, error) {
+func (a *Adapter) generateConsoleImageViaTool(ctx context.Context, credential account.Credential, format string, model string, fallback consoleImageFallback) (*provider.Response, error) {
 	token, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
 	if err != nil {
 		return nil, err
 	}
-	body, err := json.Marshal(buildConsoleImageToolPayload(fallback))
+	body, err := json.Marshal(buildConsoleImageToolPayload(model, fallback))
 	if err != nil {
 		return nil, err
 	}
