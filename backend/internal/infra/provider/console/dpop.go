@@ -379,8 +379,8 @@ func (a *Adapter) doDPoPRequestWithOptions(
 		if strings.TrimSpace(options.referer) != "" {
 			request.Header.Set("Referer", options.referer)
 		}
-		if strings.HasSuffix(request.URL.Path, "/responses") {
-			request.Header.Set("x-cluster", "https://us-east-1.api.x.ai")
+		if cluster := consoleClusterForRequest(ctx, request.URL.Path); cluster != "" {
+			request.Header.Set("x-cluster", cluster)
 		}
 		if apiKey != "" {
 			request.Header.Set(consoleAPIKeyHeader, apiKey)
