@@ -129,7 +129,7 @@ func (a *Adapter) GenerateImage(ctx context.Context, request provider.ImageGener
 	if quality != "" {
 		payload["quality"] = quality
 	}
-	return a.forwardConsoleMedia(ctx, request.Credential, "/images/generations", payload, format, count)
+	return a.forwardConsoleImage(ctx, request.Credential, "/images/generations", payload, format, count, consoleImageFallback{prompt: request.Prompt, aspectRatio: ratio, count: count})
 }
 
 func (a *Adapter) EditImage(ctx context.Context, request provider.ImageEditRequest) (*provider.Response, error) {
@@ -188,7 +188,7 @@ func (a *Adapter) EditImage(ctx context.Context, request provider.ImageEditReque
 	if quality != "" {
 		payload["quality"] = quality
 	}
-	return a.forwardConsoleMedia(ctx, request.Credential, "/images/edits", payload, format, count)
+	return a.forwardConsoleImage(ctx, request.Credential, "/images/edits", payload, format, count, consoleImageFallback{prompt: request.Prompt, aspectRatio: ratio, count: count, inputImages: consoleImageURLs(images)})
 }
 
 func (a *Adapter) forwardConsoleMedia(ctx context.Context, credential account.Credential, path string, payload any, format string, quotaUnits int) (*provider.Response, error) {
@@ -970,4 +970,14 @@ func consoleVideoImageCounts(request provider.VideoRequest) (firstFrames int, re
 		}
 	}
 	return firstFrames, referenceImages
+}
+
+func consoleImageURLs(images []map[string]any) []string {
+	urls := make([]string, 0, len(images))
+	for _, image := range images {
+		if value, ok := image["url"].(string); ok && value != "" {
+			urls = append(urls, value)
+		}
+	}
+	return urls
 }
