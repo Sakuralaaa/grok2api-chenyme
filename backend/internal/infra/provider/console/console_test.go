@@ -1601,7 +1601,7 @@ func TestConsoleImageGenerationForwardsStandardDPoPRequest(t *testing.T) {
 			return
 		}
 		verifyTestDPoPProof(t, request)
-		if request.Header.Get("x-cluster") != "" {
+		if request.Header.Get("x-cluster") != consoleClusterUSWest2 {
 			t.Errorf("image x-cluster = %q", request.Header.Get("x-cluster"))
 		}
 		var payload map[string]any
