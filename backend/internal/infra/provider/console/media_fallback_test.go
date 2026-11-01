@@ -31,7 +31,7 @@ func TestIsConsoleImageSpendingLimitResponse(t *testing.T) {
 }
 
 func TestBuildConsoleImageToolPayload(t *testing.T) {
-	payload := buildConsoleImageToolPayload(consoleImageFallback{prompt: "a cat", aspectRatio: "16:9", count: 2})
+	payload := buildConsoleImageToolPayload(consoleImageToolModel, consoleImageFallback{prompt: "a cat", aspectRatio: "16:9", count: 2})
 	text, _ := payload["input"].(string)
 	for _, want := range []string{"image generation tool", "aspect ratio 16:9", "Generate 2 different images", "Prompt: a cat"} {
 		if !strings.Contains(text, want) {
@@ -41,7 +41,7 @@ func TestBuildConsoleImageToolPayload(t *testing.T) {
 	if payload["tool_choice"] != "required" {
 		t.Fatal("tool_choice must be required")
 	}
-	edit := buildConsoleImageToolPayload(consoleImageFallback{prompt: "make it red", count: 1, inputImages: []string{"data:image/png;base64,AAAA"}})
+	edit := buildConsoleImageToolPayload(consoleImageToolModel, consoleImageFallback{prompt: "make it red", count: 1, inputImages: []string{"data:image/png;base64,AAAA"}})
 	raw, _ := json.Marshal(edit["input"])
 	if !strings.Contains(string(raw), `"input_image"`) || !strings.Contains(string(raw), "edit the attached image") {
 		t.Fatalf("edit input wrong: %s", raw)
