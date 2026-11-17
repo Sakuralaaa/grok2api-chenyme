@@ -642,8 +642,9 @@ export function resetAccountsQuota(ids: string[], provider: AccountProvider): Pr
   return apiRequest("/api/admin/v1/accounts/batch/reset-quota", { method: "POST", body: { ids, provider } }, decodeCountResult<{ reset: number }>("reset"));
 }
 
-export function resetAllAccountQuota(): Promise<{ reset: number }> {
-  return apiRequest("/api/admin/v1/accounts/reset-quota", { method: "POST" }, decodeCountResult<{ reset: number }>("reset"));
+export function resetAllAccountQuota(provider?: AccountProvider): Promise<{ reset: number }> {
+  const query = provider === "grok_console" ? "?provider=grok_console" : "";
+  return apiRequest(`/api/admin/v1/accounts/reset-quota${query}`, { method: "POST" }, decodeCountResult<{ reset: number }>("reset"));
 }
 
 export function refreshAccountsTokens(ids: string[], provider: AccountProvider): Promise<AccountTokenRefreshResultDTO> {

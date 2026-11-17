@@ -642,11 +642,12 @@ func (h *Handler) batchResetQuota(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidId", err.Error())
 		return
 	}
-	if request.Provider != string(accountdomain.ProviderBuild) {
-		response.Error(c, http.StatusBadRequest, "invalidProvider", "仅 Grok Build 账号支持手动重置额度状态")
+	providerValue := accountdomain.Provider(request.Provider)
+	if providerValue != accountdomain.ProviderBuild && providerValue != accountdomain.ProviderConsole {
+		response.Error(c, http.StatusBadRequest, "invalidProvider", "仅 Grok Build / Console 账号支持手动重置额度状态")
 		return
 	}
-	reset, err := h.service.BatchResetQuotaState(c.Request.Context(), ids)
+	reset, err := h.service.BatchResetProviderQuotaState(c.Request.Context(), providerValue, ids)
 	if err != nil {
 		h.writeServiceError(c, "quotaBatchResetFailed", err, http.StatusInternalServerError, "批量重置额度状态失败")
 		return
@@ -655,6 +656,15 @@ func (h *Handler) batchResetQuota(c *gin.Context) {
 }
 
 func (h *Handler) resetAllBuildQuota(c *gin.Context) {
+	if c.Query("provider") == string(accountdomain.ProviderConsole) {
+		reset, err := h.service.ResetAllConsoleQuotaState(c.Request.Context())
+		if err != nil {
+			h.writeServiceError(c, "quotaResetFailed", err, http.StatusInternalServerError, "重置全部 Console 额度状态失败")
+			return
+		}
+		response.Success(c, http.StatusOK, gin.H{"reset": reset})
+		return
+	}
 	reset, err := h.service.ResetAllBuildQuotaState(c.Request.Context())
 	if err != nil {
 		h.writeServiceError(c, "quotaResetFailed", err, http.StatusInternalServerError, "重置全部 Grok Build 额度状态失败")

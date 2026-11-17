@@ -2251,6 +2251,17 @@ func (s *Service) applyRateLimitReconciliation(ctx context.Context, credential a
 		return
 	}
 	if credential.Provider == accountdomain.ProviderConsole && status == http.StatusPaymentRequired {
+		if reconcileErr == nil && state == accountapp.RateLimitReconcileAvailable {
+			// usage-status still reports budget. Most often this is a request-scoped
+			// rejection: the upstream pre-check estimated this one request above the
+			// remaining weekly budget. Pause briefly and re-probe instead of parking
+			// the account for 24h; if the budget really ran out, the next 402 lands
+			// after usage is recorded and reconciles as exhausted.
+			if err := s.selector.MarkConsoleSpendingLimitSoftPause(ctx, credential, consoleSpendingLimitSoftPause); err != nil {
+				s.logger.Warn("console_spending_limit_soft_pause_failed", "account_id", credential.ID, "error", err)
+			}
+			return
+		}
 		// 402 spending-limit is authoritative even when the panel still shows
 		// budget: usage is recorded ~45s after execution. Pause until the next
 		// probe instead of applying an exponential failure cooldown.

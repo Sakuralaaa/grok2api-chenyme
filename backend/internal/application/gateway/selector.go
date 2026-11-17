@@ -65,6 +65,10 @@ const softNetworkCooldown = 5 * time.Second
 
 const defaultFreeQuotaRecoveryPause = 24 * time.Hour
 
+// consoleSpendingLimitSoftPause is used when a Console 402 arrives while the
+// upstream usage-status still shows remaining weekly budget.
+const consoleSpendingLimitSoftPause = 15 * time.Minute
+
 var errRoutingCredentialStale = errors.New("routing credential is no longer available")
 
 // credentialMaterialFailureSkipLimit 限制一次选号连续跳过的同类瞬态故障。
@@ -1134,6 +1138,16 @@ func (s *Selector) MarkModelAccessDenied(ctx context.Context, credential account
 	}
 	s.evictCandidate(credential.Provider, credential.ID)
 	return nil
+}
+
+// MarkConsoleSpendingLimitSoftPause parks a Console account for a short probe
+// window instead of the default 24h recovery pause.
+func (s *Selector) MarkConsoleSpendingLimitSoftPause(ctx context.Context, credential account.Credential, pause time.Duration) error {
+	now := time.Now().UTC()
+	if pause <= 0 {
+		pause = consoleSpendingLimitSoftPause
+	}
+	return s.markFreeQuotaExhaustedAt(ctx, credential, 0, 0, now, now.Add(pause))
 }
 
 // MarkPaymentQuotaExhausted removes a spending-limited account from routing.

@@ -4589,21 +4589,32 @@ func drainDetectBody(body io.ReadCloser) {
 	_, _ = io.Copy(io.Discard, io.LimitReader(body, 1<<20))
 }
 
-// BatchResetQuotaState clears local Build quota recovery state without changing
-// upstream billing snapshots or historical audit usage.
+// BatchResetQuotaState clears local Build/Console quota recovery state without
+// changing upstream billing snapshots or historical audit usage.
 func (s *Service) BatchResetQuotaState(ctx context.Context, ids []uint64) (int, error) {
+	return s.BatchResetProviderQuotaState(ctx, accountdomain.ProviderBuild, ids)
+}
+
+// BatchResetProviderQuotaState clears the local "待重置" recovery rows for the
+// given provider. Console accounts can be paused by a request-scoped 402
+// (spending-limit pre-check on one expensive request) while usage-status
+// still reports budget, so they need the same manual escape hatch as Build.
+func (s *Service) BatchResetProviderQuotaState(ctx context.Context, providerValue accountdomain.Provider, ids []uint64) (int, error) {
+	if providerValue != accountdomain.ProviderBuild && providerValue != accountdomain.ProviderConsole {
+		return 0, invalidInput("仅 Grok Build / Console 账号支持手动重置额度状态")
+	}
 	values, err := normalizeIDs(ids, maxQuotaResetAccounts)
 	if err != nil {
 		return 0, err
 	}
 	for start := 0; start < len(values); start += quotaResetChunkSize {
 		end := min(start+quotaResetChunkSize, len(values))
-		count, countErr := s.accounts.CountProviderAccountsByIDs(ctx, accountdomain.ProviderBuild, values[start:end])
+		count, countErr := s.accounts.CountProviderAccountsByIDs(ctx, providerValue, values[start:end])
 		if countErr != nil {
 			return 0, countErr
 		}
 		if count != int64(end-start) {
-			return 0, invalidInput("仅 Grok Build 账号支持手动重置额度状态")
+			return 0, invalidInput("所选账号与 Provider 不一致，无法重置额度状态")
 		}
 	}
 	reset := 0
@@ -4612,7 +4623,7 @@ func (s *Service) BatchResetQuotaState(ctx context.Context, ids []uint64) (int, 
 			return reset, err
 		}
 		end := min(start+quotaResetChunkSize, len(values))
-		if err := s.accounts.ResetQuotaState(ctx, accountdomain.ProviderBuild, values[start:end]); err != nil {
+		if err := s.accounts.ResetQuotaState(ctx, providerValue, values[start:end]); err != nil {
 			return reset, err
 		}
 		reset += end - start
@@ -4624,6 +4635,11 @@ func (s *Service) BatchResetQuotaState(ctx context.Context, ids []uint64) (int, 
 // account without materializing the complete account ID set in memory.
 func (s *Service) ResetAllBuildQuotaState(ctx context.Context) (int64, error) {
 	return s.accounts.ResetProviderQuotaState(ctx, accountdomain.ProviderBuild, true)
+}
+
+// ResetAllConsoleQuotaState clears local recovery state for every enabled Console account.
+func (s *Service) ResetAllConsoleQuotaState(ctx context.Context) (int64, error) {
+	return s.accounts.ResetProviderQuotaState(ctx, accountdomain.ProviderConsole, true)
 }
 
 // BatchRefreshQuota 使用有限并发同步选中 Web 或 Console 账号的额度窗口。

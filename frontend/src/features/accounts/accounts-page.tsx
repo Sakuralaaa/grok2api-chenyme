@@ -589,7 +589,7 @@ export function AccountsPage() {
   });
 
   const allQuotaResetMutation = useMutation({
-    mutationFn: resetAllAccountQuota,
+    mutationFn: () => resetAllAccountQuota(provider),
     onSuccess: (result) => {
       setSyncAllOpen(false);
       toast.success(t("accountQuotaReset.completed", result));
@@ -1454,7 +1454,7 @@ export function AccountsPage() {
                 {provider === "grok_web" || provider === "grok_console" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setWebAccountScriptsTargets([...selected])}>{t("webAccountScripts.action")}</Button> : null}
                 {provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openDetectDialog("selected")}>{t("accountCredential.detectAction")}</Button> : null}
                 <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => {
-                  if (provider === "grok_build") {
+                  if (provider === "grok_build" || provider === "grok_console") {
                     setBatchQuotaTask("sync");
                     setBatchQuotaTaskOpen(true);
                     return;
@@ -1592,7 +1592,7 @@ export function AccountsPage() {
             <AlertDialogTitle>{t(provider === "grok_build" ? "accountQuotaTask.allTitle" : "accounts.syncAllTitle")}</AlertDialogTitle>
             <AlertDialogDescription>{t(provider === "grok_build" ? "accountQuotaTask.allDescription" : provider === "grok_web" ? "accounts.syncAllWebDescription" : "console.syncAllDescription")}</AlertDialogDescription>
           </AlertDialogHeader>
-          {provider === "grok_build" ? (
+          {provider === "grok_build" || provider === "grok_console" ? (
             <div className="space-y-3">
               <Tabs value={allQuotaTask} onValueChange={(value) => setAllQuotaTask(value as BuildQuotaTask)}>
                 <TabsList className="grid h-10 w-full grid-cols-2 p-1">
@@ -1607,7 +1607,7 @@ export function AccountsPage() {
             <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction disabled={quotaSyncMutation.isPending || allQuotaResetMutation.isPending} onClick={(event) => {
               event.preventDefault();
-              if (provider === "grok_build" && allQuotaTask === "reset") allQuotaResetMutation.mutate();
+              if ((provider === "grok_build" || provider === "grok_console") && allQuotaTask === "reset") allQuotaResetMutation.mutate();
               else quotaSyncMutation.mutate(provider);
             }}>
               {quotaSyncMutation.isPending ? <><Spinner />{quotaSyncProgress ? <span className="tabular-nums">{quotaSyncProgress.completed} / {quotaSyncProgress.total}</span> : t("common.loading")}</> : allQuotaResetMutation.isPending ? <Spinner /> : t(provider === "grok_build" ? "accountQuotaTask.execute" : "accounts.syncAll")}

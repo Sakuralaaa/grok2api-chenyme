@@ -1958,7 +1958,8 @@ func TestConsoleRateLimitReconciliationUsesNonAccumulatingCooldown(t *testing.T)
 		{name: "quota probe inconclusive", status: http.StatusTooManyRequests, state: accountapp.RateLimitReconcileInconclusive, err: errors.New("usage probe failed"), wantFailureCount: 3},
 		// 402 spending-limit is authoritative even while the lagging usage panel
 		// still shows budget: pause via quota recovery, never grow failures.
-		{name: "payment failure pauses until probe", status: http.StatusPaymentRequired, state: accountapp.RateLimitReconcileAvailable, wantFailureCount: 3},
+		{name: "payment failure with budget soft pauses", status: http.StatusPaymentRequired, state: accountapp.RateLimitReconcileAvailable, wantFailureCount: 3},
+		{name: "payment failure inconclusive pauses until probe", status: http.StatusPaymentRequired, state: accountapp.RateLimitReconcileInconclusive, wantFailureCount: 3},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -2005,7 +2006,14 @@ func TestConsoleRateLimitReconciliationUsesNonAccumulatingCooldown(t *testing.T)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if recovery.Status != account.QuotaRecoveryStatusExhausted || recovery.NextProbeAt == nil || recovery.NextProbeAt.Before(before.Add(23*time.Hour)) {
+				wantPause := 23 * time.Hour
+				if test.state == accountapp.RateLimitReconcileAvailable && test.err == nil {
+					wantPause = consoleSpendingLimitSoftPause - time.Minute
+					if recovery.NextProbeAt != nil && recovery.NextProbeAt.After(before.Add(consoleSpendingLimitSoftPause+time.Minute)) {
+						t.Fatalf("soft pause too long: %#v", recovery)
+					}
+				}
+				if recovery.Status != account.QuotaRecoveryStatusExhausted || recovery.NextProbeAt == nil || recovery.NextProbeAt.Before(before.Add(wantPause)) {
 					t.Fatalf("quota recovery = %#v", recovery)
 				}
 				return
