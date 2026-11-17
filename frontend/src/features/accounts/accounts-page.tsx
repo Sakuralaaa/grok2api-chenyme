@@ -58,7 +58,7 @@ import {
   refreshAccountBilling,
   refreshAccountsQuota,
   resetAccountsQuota,
-  resetAllAccountQuota,
+  resetAllAccountQuota, resetConsoleStaleWaiting,
   refreshAccountsTokens,
   refreshAccountToken,
   refreshAccountQuota,
@@ -586,6 +586,16 @@ export function AccountsPage() {
     },
     onError: (error) => { if (!isAbortError(error)) showError(error); },
     onSettled: () => { quotaSyncAbortRef.current = null; setQuotaSyncProgress(null); invalidateAccountData(); },
+  });
+
+  const consoleStaleResetMutation = useMutation({
+    mutationFn: resetConsoleStaleWaiting,
+    onSuccess: (result) => {
+      if (result.checked === 0) toast.success(t("accounts.consoleStaleResetNone"));
+      else toast.success(t("accounts.consoleStaleResetDone", result));
+    },
+    onError: showError,
+    onSettled: invalidateAccountData,
   });
 
   const allQuotaResetMutation = useMutation({
@@ -1471,6 +1481,7 @@ export function AccountsPage() {
                 {(provider === "grok_web" || provider === "grok_console") && hasProviderAccounts ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setWebAccountScriptsTargets("all")}>{t("webAccountScripts.action")}</Button> : null}
                 {hasProviderAccounts && provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openDetectDialog("all")}>{t("accountCredential.detectAction")}</Button> : null}
                 {hasProviderAccounts ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => { setAllQuotaTask("sync"); setSyncAllOpen(true); }}>{t("accountCredential.quotaSyncAction")}</Button> : null}
+                {hasProviderAccounts && provider === "grok_console" ? <Button variant="secondary" size="sm" title={t("accounts.consoleStaleResetHint")} disabled={bulkTaskPending || consoleStaleResetMutation.isPending} onClick={() => consoleStaleResetMutation.mutate()}>{consoleStaleResetMutation.isPending ? <Spinner /> : null}{t("accounts.consoleStaleResetAction")}</Button> : null}
                 {hasProviderAccounts && provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setRenewAllOpen(true)}>{t("accountCredential.refreshAction")}</Button> : null}
                 {hasProviderAccounts ? <Button variant="secondary" size="sm" className="bg-destructive/10 text-destructive hover:bg-destructive/15 hover:text-destructive" disabled={bulkTaskPending} onClick={() => { resetCleanupState(); setCleanupOpen(true); }}><Trash2 />{t("accounts.cleanupAction")}</Button> : null}
               </div>

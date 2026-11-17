@@ -155,6 +155,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/accounts/console/refresh-quotas", h.refreshAllConsoleQuotas)
 	router.POST("/accounts/refresh-billing", h.refreshAllBilling)
 	router.POST("/accounts/reset-quota", h.resetAllBuildQuota)
+	router.POST("/accounts/console/reset-stale-waiting", h.resetConsoleStaleWaiting)
 	router.POST("/accounts/refresh-tokens", h.refreshAllTokens)
 	router.POST("/accounts/cleanup", h.cleanup)
 	router.POST("/accounts/cleanup-preview", h.cleanupPreview)
@@ -653,6 +654,15 @@ func (h *Handler) batchResetQuota(c *gin.Context) {
 		return
 	}
 	response.Success(c, http.StatusOK, gin.H{"reset": reset})
+}
+
+func (h *Handler) resetConsoleStaleWaiting(c *gin.Context) {
+	checked, reset, err := h.service.ResetConsoleStaleWaiting(c.Request.Context())
+	if err != nil {
+		h.writeServiceError(c, "quotaResetFailed", err, http.StatusInternalServerError, "解除 Console 待重置失败")
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"checked": checked, "reset": reset})
 }
 
 func (h *Handler) resetAllBuildQuota(c *gin.Context) {

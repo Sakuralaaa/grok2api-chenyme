@@ -2674,6 +2674,19 @@ func (r *AccountRepository) ResetQuotaState(ctx context.Context, provider accoun
 	return err
 }
 
+// ListConsoleWaitingResetWithBudget returns enabled Console accounts that are
+// parked in local quota recovery although their latest upstream console usage
+// snapshot still reports remaining weekly budget.
+func (r *AccountRepository) ListConsoleWaitingResetWithBudget(ctx context.Context) ([]uint64, error) {
+	var ids []uint64
+	err := r.db.db.WithContext(ctx).Model(&accountModel{}).
+		Where("provider = ? AND enabled = ? AND auth_status = ?", account.ProviderConsole, true, account.AuthStatusActive).
+		Where("EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id)").
+		Where("EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'console' AND quota.remaining > 0)").
+		Order("id").Pluck("id", &ids).Error
+	return ids, err
+}
+
 func (r *AccountRepository) ResetProviderQuotaState(ctx context.Context, provider account.Provider, activeOnly bool) (int64, error) {
 	var accountCount int64
 	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

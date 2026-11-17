@@ -4637,6 +4637,32 @@ func (s *Service) ResetAllBuildQuotaState(ctx context.Context) (int64, error) {
 	return s.accounts.ResetProviderQuotaState(ctx, accountdomain.ProviderBuild, true)
 }
 
+// ResetConsoleStaleWaiting refreshes the upstream usage of Console accounts
+// that are 待重置 while their snapshot still shows budget, then clears the
+// local recovery state of those that still have budget after the refresh.
+// Accounts that are really exhausted are left untouched.
+func (s *Service) ResetConsoleStaleWaiting(ctx context.Context) (checked int, reset int, err error) {
+	ids, err := s.accounts.ListConsoleWaitingResetWithBudget(ctx)
+	if err != nil || len(ids) == 0 {
+		return 0, 0, err
+	}
+	checked = len(ids)
+	// Best effort: a failed refresh keeps the last snapshot, which still shows budget.
+	_, _, _ = s.syncConsoleQuotaAccounts(ctx, "console_stale_waiting_reset", ids)
+	ids, err = s.accounts.ListConsoleWaitingResetWithBudget(ctx)
+	if err != nil || len(ids) == 0 {
+		return checked, 0, err
+	}
+	for start := 0; start < len(ids); start += quotaResetChunkSize {
+		end := min(start+quotaResetChunkSize, len(ids))
+		if err := s.accounts.ResetQuotaState(ctx, accountdomain.ProviderConsole, ids[start:end]); err != nil {
+			return checked, reset, err
+		}
+		reset += end - start
+	}
+	return checked, reset, nil
+}
+
 // ResetAllConsoleQuotaState clears local recovery state for every enabled Console account.
 func (s *Service) ResetAllConsoleQuotaState(ctx context.Context) (int64, error) {
 	return s.accounts.ResetProviderQuotaState(ctx, accountdomain.ProviderConsole, true)
